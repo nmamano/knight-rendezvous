@@ -197,13 +197,21 @@ export function registerSocket(app: Hono, store: RoomStore) {
             return;
           }
           case "newPuzzle": {
-            // No payload validation: newPuzzle carries no fields beyond `t`. The
-            // player is inferred from the bound slot; it is a room-wide RESET (not
-            // win-gated), so the Room handles it while playing OR won, canceling
-            // any running playback first.
+            // The player is inferred from the bound slot; newPuzzle is a room-wide
+            // RESET (not win-gated), so the Room handles it while playing OR won,
+            // canceling any running playback first.
+            //
+            // Optional `n`/`steps` choose the new board's size + path length.
+            // Envelope validation is structural only: keep an integer, otherwise
+            // drop it to `undefined` (→ the Game's default). We DON'T reject the
+            // whole message for a bad n/steps — and we do NOT range-check here.
+            // The SERVER (Game constructor) clamps to valid ranges; the client is
+            // never trusted with the bounds.
             const b = active();
             if (!b) return;
-            b.room.newPuzzle(b.pid, conn);
+            const n = isInt(msg.n) ? msg.n : undefined;
+            const steps = isInt(msg.steps) ? msg.steps : undefined;
+            b.room.newPuzzle(b.pid, conn, n, steps);
             return;
           }
           case "leave": {

@@ -33,6 +33,39 @@ export const BOARD_N = 6;
 export const BOARD_STEPS = 18;
 
 // ---------------------------------------------------------------------------
+// Player-adjustable board-size + path-length bounds (ported from
+// knights-puzzle/src/difficulty.ts). BOARD_N/BOARD_STEPS above stay the
+// defaults for the FIRST board; the play-screen sliders let players pick any
+// n in [MIN_N, MAX_N] and steps in [MIN_STEPS, maxSteps(n)] for a fresh puzzle.
+// The server CLAMPS every requested value via clampN/clampSteps before it
+// generates — the client is never trusted with the range.
+// ---------------------------------------------------------------------------
+
+export const MIN_N = 4;
+export const MAX_N = 9;
+export const MIN_STEPS = 3;
+
+/** Largest legal path length (knight moves) on an n×n board. */
+export function maxSteps(n: number): number {
+  return n * n - 1;
+}
+
+/** Clamp board size into [MIN_N, MAX_N]. */
+export function clampN(n: number): number {
+  if (n < MIN_N) return MIN_N;
+  if (n > MAX_N) return MAX_N;
+  return n;
+}
+
+/** Clamp path length into [MIN_STEPS, maxSteps(n)]. Assumes n is already clamped. */
+export function clampSteps(n: number, steps: number): number {
+  const hi = maxSteps(n);
+  if (steps < MIN_STEPS) return MIN_STEPS;
+  if (steps > hi) return hi;
+  return steps;
+}
+
+// ---------------------------------------------------------------------------
 // View-solution playback cadence (C5, locked decision 7).
 //
 // The default per-frame interval the Room uses to drive view-solution playback.

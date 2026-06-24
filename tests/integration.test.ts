@@ -1542,6 +1542,84 @@ describe("C6 newPuzzle (real WS)", () => {
     p2.close();
   });
 
+  test("newPuzzle with explicit n/steps → both clients get a board of that size, identical, fully reset", async () => {
+    const { p1, p2 } = await activeGame();
+    const before1 = p1.states().length;
+    const before2 = p2.states().length;
+    // A different, in-range size from the default (n=6, steps=18): n=5 → maxSteps 24.
+    p1.send({ t: "newPuzzle", n: 5, steps: 10 });
+    const r1 = await awaitStateCount(p1, before1 + 1);
+    const r2 = await awaitStateCount(p2, before2 + 1);
+    // The board carries the chosen n/steps, identical across clients, fully reset.
+    expect(r1.board.n).toBe(5);
+    expect(r1.board.steps).toBe(10);
+    assertFreshAndIdentical(r1, r2);
+    p1.close();
+    p2.close();
+  });
+
+  test("newPuzzle CLAMPS out-of-range n/steps server-side (never trusts the client)", async () => {
+    const { p1, p2 } = await activeGame();
+
+    // (a) n=99, steps=999 → n clamps to MAX_N (9), steps clamps to maxSteps(9)=80.
+    {
+      const before1 = p1.states().length;
+      const before2 = p2.states().length;
+      p1.send({ t: "newPuzzle", n: 99, steps: 999 });
+      const r1 = await awaitStateCount(p1, before1 + 1);
+      const r2 = await awaitStateCount(p2, before2 + 1);
+      expect(r1.board.n).toBe(9);
+      expect(r1.board.steps).toBe(9 * 9 - 1); // 80
+      assertFreshAndIdentical(r1, r2);
+    }
+
+    // (b) n=1 → clamps to MIN_N (4); a tiny steps clamps up to MIN_STEPS (3).
+    {
+      const before1 = p1.states().length;
+      const before2 = p2.states().length;
+      p1.send({ t: "newPuzzle", n: 1, steps: 1 });
+      const r1 = await awaitStateCount(p1, before1 + 1);
+      const r2 = await awaitStateCount(p2, before2 + 1);
+      expect(r1.board.n).toBe(4);
+      expect(r1.board.steps).toBe(3); // MIN_STEPS
+      assertFreshAndIdentical(r1, r2);
+    }
+
+    p1.close();
+    p2.close();
+  });
+
+  test("newPuzzle with non-integer n/steps is ignored → falls back to defaults", async () => {
+    const { p1, p2 } = await activeGame();
+    const before1 = p1.states().length;
+    const before2 = p2.states().length;
+    // Non-integer values are dropped by the envelope validator → server defaults
+    // (BOARD_N=6, BOARD_STEPS=18).
+    p1.send({ t: "newPuzzle", n: 5.5, steps: "big" } as unknown as ClientMsg);
+    const r1 = await awaitStateCount(p1, before1 + 1);
+    const r2 = await awaitStateCount(p2, before2 + 1);
+    expect(r1.board.n).toBe(6);
+    expect(r1.board.steps).toBe(18);
+    assertFreshAndIdentical(r1, r2);
+    p1.close();
+    p2.close();
+  });
+
+  test('the witness path NEVER leaks after a PARAMETERIZED newPuzzle: no "path" on the wire', async () => {
+    const { p1, p2 } = await activeGame();
+    const before1 = p1.states().length;
+    const before2 = p2.states().length;
+    p1.send({ t: "newPuzzle", n: 7, steps: 20 });
+    await awaitStateCount(p1, before1 + 1);
+    await awaitStateCount(p2, before2 + 1);
+    const noPath = (c: Client) =>
+      c.allMessages().every((m) => !JSON.stringify(m).includes('"path"'));
+    expect(noPath(p1)).toBe(true);
+    expect(noPath(p2)).toBe(true);
+    p1.close();
+    p2.close();
+  });
+
   test("newPuzzle DURING playback → playback canceled (no late frames) and reset to a fresh playing board", async () => {
     const { p1, p2 } = await activeGame();
     p1.send({ t: "viewSolution" });

@@ -3,8 +3,9 @@ import { Lobby } from "@/components/Lobby";
 import { Waiting } from "@/components/Waiting";
 import { Board } from "@/components/Board";
 import { Net, type Status } from "@/net/socket";
-import type { Cell } from "@shared/engine";
-import type { PlayerId, RoomSnapshot, ServerMsg } from "@shared/protocol";
+import { knightMoves, type Cell } from "@shared/engine";
+import { MIN_N, MAX_N, MIN_STEPS, maxSteps, clampSteps } from "@shared/config";
+import type { Board, PlayerId, RoomSnapshot, ServerMsg } from "@shared/protocol";
 
 const SESSION_KEY = "knight-rendezvous";
 
@@ -55,6 +56,46 @@ function clearRoomParam() {
   } catch {
     // history may be unavailable in some embeds; ignore
   }
+}
+
+function sameCell(a: Cell, b: Cell): boolean {
+  return a.r === b.r && a.c === b.c;
+}
+
+// The LOCAL player's legal next squares, computed to EXACTLY match the server's
+// move() rule (server/game.ts): from `knights[you]`, every knight move that is
+// in-bounds + `board.available` + NOT in union(visited.p1, visited.p2), PLUS the
+// OTHER knight's CURRENT cell IF it is a knight-move away (the rendezvous WINNING
+// hop — the one allowed exception to no-reuse, locked decision 1). We do NOT
+// reuse the engine's `legalMoves` here: it would exclude the partner's cell (it
+// is in the partner's trail), but that cell is exactly the square we must surface
+// so players can see how to win. Returns [] for a missing `you`.
+function legalTargets(
+  board: Board,
+  you: PlayerId | null,
+  knights: { p1: Cell; p2: Cell },
+  visited: { p1: Cell[]; p2: Cell[] },
+): Cell[] {
+  if (!you) return [];
+  const from = knights[you];
+  const other = you === "p1" ? knights.p2 : knights.p1;
+  const visitedByEither = (c: Cell): boolean =>
+    visited.p1.some((v) => sameCell(v, c)) || visited.p2.some((v) => sameCell(v, c));
+
+  const out: Cell[] = [];
+  for (const m of knightMoves(from, board.n)) {
+    // The rendezvous square: the OTHER knight's current cell. It IS in the
+    // partner's trail (visitedByEither would reject it), so it gets ADDED back
+    // here as the sole exception — it is the winning move and MUST be shown.
+    if (sameCell(m, other)) {
+      out.push(m);
+      continue;
+    }
+    if (!board.available[m.r][m.c]) continue;
+    if (visitedByEither(m)) continue;
+    out.push(m);
+  }
+  return out;
 }
 
 function PlayerTag({ name, color, you }: { name: string; color: string; you: boolean }) {
@@ -114,6 +155,13 @@ export function App() {
   const [hintCell, setHintCell] = useState<Cell | null>(null);
   const [hintOffPath, setHintOffPath] = useState(false);
   const [hintNonce, setHintNonce] = useState(0);
+  // Fix 2 — play-screen sliders (board size + path length). These are LOCAL
+  // pending values that ONLY take effect when "New puzzle" is pressed; dragging
+  // them never regenerates. null = "follow the current board" (initialized from
+  // board.n/board.steps the first time an active board renders, and re-synced
+  // whenever the active board changes via the effect below).
+  const [pendingN, setPendingN] = useState<number | null>(null);
+  const [pendingSteps, setPendingSteps] = useState<number | null>(null);
 
   const netRef = useRef<Net | null>(null);
   const urlRoom = roomFromUrl();
@@ -194,6 +242,18 @@ export function App() {
     }
   }, [snapshot, you]);
 
+  // Fix 2 — keep the slider pending values in sync with the ACTIVE board. We
+  // re-sync whenever the broadcast board's n/steps change (e.g. after a New
+  // puzzle regenerates at a new size): the sliders then reflect the live board
+  // until the player drags them. Keyed on the board's n+steps so an unrelated
+  // re-render (a move, a hint) does NOT clobber an in-progress drag.
+  const boardN = snapshot?.board?.n;
+  const boardSteps = snapshot?.board?.steps;
+  useEffect(() => {
+    if (boardN != null) setPendingN(boardN);
+    if (boardSteps != null) setPendingSteps(boardSteps);
+  }, [boardN, boardSteps]);
+
   // Transient, non-blocking toast for in-game rejections (illegal_move). Re-fires
   // on each actionNonce bump even if the message text repeats.
   const [toast, setToast] = useState<string | null>(null);
@@ -272,9 +332,11 @@ export function App() {
   // C6 — New puzzle (room-wide reset, locked decision 5). No optimistic UI: the
   // server regenerates the board and broadcasts; the WinPanel disappears and the
   // board becomes interactive again purely from the resulting server `state`.
-  const newPuzzle = useCallback(() => {
+  // Fix 2 — carries the slider-chosen n/steps; the server clamps them. We send
+  // the pending values when set (falling back to undefined → server defaults).
+  const newPuzzle = useCallback((n?: number, steps?: number) => {
     setError(null);
-    netRef.current?.send({ t: "newPuzzle" });
+    netRef.current?.send({ t: "newPuzzle", n, steps });
   }, []);
 
   const exit = useCallback(() => {
@@ -312,6 +374,19 @@ export function App() {
     // predicate is the source every control consults (locked decision 7: inputs
     // locked during playback; the win panel already covers "won").
     const locked = snapshot.status !== "playing";
+    // Fix 1 — the LOCAL player's legal next squares, highlighted ONLY while
+    // "playing" (never during playback/won). Computed to EXACTLY mirror the
+    // server's move() rule, and it INCLUDES the rendezvous square (the partner's
+    // current cell when a knight-move away) so players can see the winning hop.
+    const legalCells =
+      snapshot.status === "playing"
+        ? legalTargets(snapshot.board, you, snapshot.knights, snapshot.visited)
+        : [];
+    // Fix 2 — slider display values. Default to the live board's n/steps until a
+    // drag sets a pending value; the steps label is clamped to maxSteps(n) so the
+    // "(cells)" count is always self-consistent for the chosen n.
+    const sliderN = pendingN ?? snapshot.board.n;
+    const sliderSteps = clampSteps(sliderN, pendingSteps ?? snapshot.board.steps);
     // Your own trail length drives the button-disable UX (server is the authority).
     // length<=1 means you are at your start: nothing to undo, nothing to retry.
     const myTrailLen = you ? snapshot.visited[you].length : 0;
@@ -343,6 +418,9 @@ export function App() {
           // on the server error as the only guard. A no-op onMove ignores clicks
           // client-side too.
           onMove={locked ? () => {} : move}
+          // Fix 1 — the local player's legal next squares (incl. the rendezvous
+          // square), highlighted with a pulsing accent ring while "playing".
+          legalCells={legalCells}
           // The actor-only hint cell to pulse (null when none). Keyed by nonce so a
           // repeat hint re-triggers the animation.
           hintCell={hintCell}
@@ -396,13 +474,53 @@ export function App() {
               "play again" affordance. No optimistic UI — the server resets. */}
           <button
             type="button"
-            onClick={newPuzzle}
+            onClick={() => newPuzzle(sliderN, sliderSteps)}
             disabled={newPuzzleDisabled}
             className="rounded-full border-2 border-[var(--accent)] bg-[var(--accent)] px-5 py-2 text-lg font-bold text-white shadow-[0_4px_0_0_#c9bdf4] transition hover:brightness-105 active:translate-y-0.5 active:shadow-[0_2px_0_0_#c9bdf4] disabled:cursor-not-allowed disabled:opacity-50 disabled:active:translate-y-0 disabled:active:shadow-[0_4px_0_0_#c9bdf4]"
             style={{ fontFamily: "var(--display)" }}
           >
             New puzzle
           </button>
+        </div>
+        {/* Fix 2 — board-size + path-length sliders (ported from knights-puzzle,
+            co-op-adapted). They set LOCAL pending values ONLY; dragging never
+            regenerates. The "New puzzle" button above sends the chosen n/steps to
+            regenerate the room-wide board. Labels/format mirror the original. */}
+        <div className="random-knobs">
+          <label className="slider">
+            <span>
+              Board size: <strong>{sliderN}</strong>
+            </span>
+            <input
+              type="range"
+              min={MIN_N}
+              max={MAX_N}
+              step={1}
+              value={sliderN}
+              aria-label="Board size"
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                setPendingN(next);
+                // Keep steps consistent with the new n's max so the label never
+                // shows an out-of-range path length (the server clamps too).
+                setPendingSteps((s) => clampSteps(next, s ?? sliderSteps));
+              }}
+            />
+          </label>
+          <label className="slider">
+            <span>
+              Path length: <strong>{sliderSteps}</strong> ({sliderSteps + 1} cells)
+            </span>
+            <input
+              type="range"
+              min={MIN_STEPS}
+              max={maxSteps(sliderN)}
+              step={1}
+              value={sliderSteps}
+              aria-label="Path length"
+              onChange={(e) => setPendingSteps(Number(e.target.value))}
+            />
+          </label>
         </div>
         {playback && (
           <p
@@ -419,7 +537,7 @@ export function App() {
             data-hint="off_path"
             className="rounded-2xl bg-[#9a7a2a]/10 px-4 py-2 text-sm font-semibold text-[#8a6a1a]"
           >
-            No hint from here — you've wandered off the witness path.
+            You’ve strayed from the planned solution. Undo or Retry.
           </p>
         )}
         {won && snapshot.result ? (
@@ -463,7 +581,7 @@ export function App() {
           >
             ↩ Knight&apos;s Puzzle
           </a>{" "}
-          — more cozy knight games
+          — single player
         </footer>
       </main>
     );

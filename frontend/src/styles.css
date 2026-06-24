@@ -110,6 +110,30 @@
   box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--violet-ink) 45%, transparent);
 }
 
+/* Fix 1 — legal-move highlight (ported from knights-puzzle's .open.legal): the
+   LOCAL player's legal next squares wear a pulsing lavender ring while playing.
+   This INCLUDES the rendezvous square (the partner's current cell when a
+   knight-move away), so the winning hop is always visible — even though that cell
+   may also carry the partner's knight overlay and a trail tint, the inset ring
+   still reads on top. Placed AFTER the trail-tint rules so its box-shadow wins on
+   that one shared cell (equal specificity → later rule). */
+.cell.open.legal {
+  box-shadow:
+    inset 0 0 0 3px var(--accent),
+    inset 0 0 13px 2px rgba(108, 92, 255, 0.55);
+  animation: pulse 1.1s ease-in-out infinite;
+  z-index: 1;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.13);
+  }
+}
+
 /* C5 hint pulse: the actor-only next-witness cell glows in the accent color for a
    beat (knights-puzzle hint look). Re-keyed per hint so the animation restarts. */
 .cell.open.hint-pulse {
@@ -152,7 +176,7 @@
   stroke: var(--violet);
 }
 
-/* Endpoint glyphs (start ◎ / end 🏁), matching KP. */
+/* Endpoint glyphs: both home cells show ◎ (start AND end), matching KP. */
 .glyph {
   position: relative;
   z-index: 1;

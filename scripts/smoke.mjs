@@ -259,6 +259,55 @@ try {
     if (p1Cell !== 1) throw new Error(`[${label}] p1 start cell not in the grid`);
   }
 
+  // ---- Fix 1: legal-move highlight — context A (p1) at its start must mark its
+  // legal next squares with data-legal, EXACTLY matching the server's move() rule
+  // computed Node-side from the broadcast board. While "playing" only.
+  {
+    const stateA = await pageA.evaluate(() => ({
+      knights: window.__KR__.knights,
+      visited: window.__KR__.visited,
+      status: window.__KR__.status,
+    }));
+    if (stateA.status !== "playing") {
+      throw new Error(
+        `expected status "playing" for the legal-highlight check, got ${stateA.status}`,
+      );
+    }
+    // Compute the expected legal set Node-side: knight moves from p1's cell that are
+    // available + not visited by either trail, PLUS p2's current cell if adjacent.
+    const from = stateA.knights.p1;
+    const other = stateA.knights.p2;
+    const visitedByEither = (cc) =>
+      stateA.visited.p1.some((v) => sameCell(v, cc)) ||
+      stateA.visited.p2.some((v) => sameCell(v, cc));
+    const expected = new Set();
+    for (const m of knightMovesOf(from, boardA.n)) {
+      if (sameCell(m, other)) {
+        expected.add(`${m.r}-${m.c}`); // the rendezvous square (added back)
+        continue;
+      }
+      if (!boardA.available[m.r][m.c]) continue;
+      if (visitedByEither(m)) continue;
+      expected.add(`${m.r}-${m.c}`);
+    }
+    // The DOM's data-legal cells on context A must match exactly.
+    const domLegal = new Set(
+      await pageA.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-legal="1"]')).map((el) =>
+          el.getAttribute("data-cell"),
+        ),
+      ),
+    );
+    if (domLegal.size !== expected.size || [...expected].some((k) => !domLegal.has(k))) {
+      throw new Error(
+        `legal-highlight mismatch on A:\n  expected=${JSON.stringify([...expected])}\n  dom=${JSON.stringify([...domLegal])}`,
+      );
+    }
+    if (expected.size === 0) {
+      throw new Error("expected at least one legal cell highlighted at game start");
+    }
+  }
+
   // ---- C3: drive a FULL-COVER rendezvous to a PERFECT win -----------------
   // pageA created the room (p1), pageB joined it (p2). Verify that binding, then
   // walk both knights along DISJOINT halves of the reconstructed witness until
@@ -518,6 +567,21 @@ try {
     );
   }
 
+  // ---- Fix 1: the RENDEZVOUS square must be highlighted as legal on context A.
+  // p1 is now a knight-move from p2 (which rests on meetCell), so the partner's
+  // current cell — the winning hop — must carry data-legal so the player can SEE
+  // how to win (it is the no-reuse exception that legalMoves would have excluded).
+  {
+    const rendezvousLegal = await pageA
+      .locator(`[data-cell="${meetCell.r}-${meetCell.c}"][data-legal="1"]`)
+      .count();
+    if (rendezvousLegal !== 1) {
+      throw new Error(
+        `the rendezvous square ${JSON.stringify(meetCell)} is not highlighted as legal on context A`,
+      );
+    }
+  }
+
   // ---- THE MEET-HOP: p1 hops ONTO p2's current cell (the rendezvous) ----------
   // Guarded ONLY by knight-move legality (we already verified adjacency above) —
   // NOT computeLegalTarget, which excludes the other knight's cell.
@@ -630,6 +694,80 @@ try {
     throw new Error("newPuzzle board leaked the witness path");
   }
 
+  // ---- Fix 2: parameterized New puzzle via the board-size slider. Drag the
+  // "Board size" range to a NEW in-range value (different from the current n),
+  // then click "New puzzle"; both contexts must regenerate a board of that size,
+  // identical across clients. Judge via the server-authoritative window.__KR__.
+  {
+    const curN = freshA.board.n;
+    const targetN = curN === 7 ? 8 : 7; // any in-range value different from curN
+    // Set the slider by its accessible label, dispatching input+change so React
+    // sees it (Playwright's fill on range inputs sets value + fires input).
+    await pageA.evaluate((val) => {
+      const input = document.querySelector('input[aria-label="Board size"]');
+      if (!input) throw new Error("Board size slider not found");
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      ).set;
+      setter.call(input, String(val));
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }, targetN);
+    // The label must reflect the new pending n before we regenerate.
+    await pageA.waitForFunction(
+      (val) => {
+        const input = document.querySelector('input[aria-label="Board size"]');
+        return input && Number(input.value) === val;
+      },
+      targetN,
+      { timeout: 10000 },
+    );
+
+    await pageA.getByRole("button", { name: "New puzzle" }).click();
+    for (const page of [pageA, pageB]) {
+      await page.waitForFunction(
+        (val) => {
+          const s = window.__KR__;
+          return (
+            s &&
+            s.status === "playing" &&
+            s.board &&
+            s.board.n === val &&
+            s.visited &&
+            s.visited.p1.length === 1 &&
+            s.visited.p2.length === 1
+          );
+        },
+        targetN,
+        { timeout: 15000 },
+      );
+    }
+    const paramA = await pageA.evaluate(() => ({
+      board: window.__KR__.board,
+      knights: window.__KR__.knights,
+      visited: window.__KR__.visited,
+      status: window.__KR__.status,
+      result: window.__KR__.result,
+    }));
+    const paramB = await pageB.evaluate(() => ({
+      board: window.__KR__.board,
+      knights: window.__KR__.knights,
+      visited: window.__KR__.visited,
+      status: window.__KR__.status,
+      result: window.__KR__.result,
+    }));
+    if (paramA.board.n !== targetN) {
+      throw new Error(`parameterized newPuzzle: expected n=${targetN}, got ${paramA.board.n}`);
+    }
+    if (JSON.stringify(paramA) !== JSON.stringify(paramB)) {
+      throw new Error("parameterized newPuzzle board differs between contexts");
+    }
+    if (JSON.stringify(paramA).includes('"path"')) {
+      throw new Error("parameterized newPuzzle board leaked the witness path");
+    }
+  }
+
   // ---- C6: outbound cross-link to Knight's Puzzle must be present in the DOM.
   const kpLink = await pageA.locator('a[href="https://knight.nilmamano.com"]').count();
   if (kpLink < 1) {
@@ -678,6 +816,9 @@ try {
         c6NewPuzzleSeed: freshA.board.seed,
         c6OutboundLinkPresent: true,
         c6AssetsResolve: true,
+        fix1LegalHighlightVerified: true,
+        fix1RendezvousHighlighted: true,
+        fix2ParamNewPuzzleVerified: true,
         chrome: browser.version(),
       },
       null,

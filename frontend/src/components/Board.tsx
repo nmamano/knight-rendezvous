@@ -28,6 +28,10 @@ interface Props {
   knights: { p1: Cell; p2: Cell };
   visited: { p1: Cell[]; p2: Cell[] };
   onMove: (cell: Cell) => void;
+  // Fix 1 — the LOCAL player's legal next squares (computed in App to match the
+  // server's move() rule, INCLUDING the rendezvous square). Highlighted with a
+  // pulsing accent ring. Empty unless the game is "playing".
+  legalCells?: Cell[];
   // C5 actor-only hint: the witness cell to pulse for the LOCAL player (null when
   // none). `hintNonce` re-keys the element so a repeat hint restarts the pulse.
   hintCell?: Cell | null;
@@ -39,8 +43,11 @@ function polyPoints(trail: Cell[]): string {
   return trail.map((v) => `${v.c + 0.5},${v.r + 0.5}`).join(" ");
 }
 
-export function Board({ board, knights, visited, onMove, hintCell, hintNonce }: Props) {
+export function Board({ board, knights, visited, onMove, legalCells, hintCell, hintNonce }: Props) {
   const { n, available, start, end } = board;
+  // Fix 1 — fast lookup of the local player's legal next squares for the .legal ring.
+  const legalSet = new Set<number>();
+  for (const lc of legalCells ?? []) legalSet.add(cellKey(lc.r, lc.c));
   // Board frame is 5px each side; the playable field is n cells + (n-1) gaps.
   const maxBoardPx = n * DESK_CELL + (n - 1) * GAP + 2 * PAD + 10;
 
@@ -71,11 +78,13 @@ export function Board({ board, knights, visited, onMove, hintCell, hintNonce }: 
             const isEnd = sameCell(end, cell);
             const owner = trailOwner.get(cellKey(r, c));
             const isHint = hintCell != null && sameCell(hintCell, cell);
+            const isLegal = legalSet.has(cellKey(r, c));
             const className = [
               "cell",
               dark ? "dark" : "light",
               avail ? "open" : "blocked",
               owner === "p1" ? "trail-amber" : owner === "p2" ? "trail-violet" : "",
+              isLegal ? "legal" : "",
               isHint ? "hint-pulse" : "",
             ]
               .filter(Boolean)
@@ -85,6 +94,7 @@ export function Board({ board, knights, visited, onMove, hintCell, hintNonce }: 
                 // Re-key the hinted cell on each hint so the pulse animation restarts.
                 key={isHint ? `${k}-hint-${hintNonce ?? 0}` : k}
                 data-cell={k}
+                data-legal={isLegal ? "1" : undefined}
                 data-hint={isHint ? "1" : undefined}
                 className={className}
                 role={avail ? "button" : undefined}
@@ -104,7 +114,7 @@ export function Board({ board, knights, visited, onMove, hintCell, hintNonce }: 
               >
                 {avail && (isStart || isEnd) ? (
                   <span className="glyph" aria-hidden="true">
-                    {isEnd ? "🏁" : "◎"}
+                    ◎
                   </span>
                 ) : null}
               </div>

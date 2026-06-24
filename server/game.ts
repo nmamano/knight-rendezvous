@@ -12,7 +12,7 @@
 // and a hint projects only the SINGLE next witness cell, never the whole path.
 
 import { generatePuzzle, knightMoves, type Cell, type Puzzle } from "../shared/engine";
-import { BOARD_N, BOARD_STEPS, PLAYBACK_STEP_MS } from "../shared/config";
+import { BOARD_N, BOARD_STEPS, PLAYBACK_STEP_MS, clampN, clampSteps } from "../shared/config";
 import type { Board, ColorToken, PlayerId, PlayerView, RoomSnapshot } from "../shared/protocol";
 
 // The win projection: `status` flips to "won" on the rendezvous hop, and
@@ -119,6 +119,11 @@ function randomSeed(): number {
 
 export class Game {
   readonly puzzle: Puzzle;
+  // The path length (knight MOVES) this board was generated with, CLAMPED into
+  // [MIN_STEPS, maxSteps(n)]. Stored separately because the engine's Puzzle does
+  // not carry `steps`; board() projects it so both clients echo the same value
+  // (and the sliders can initialize from it).
+  readonly steps: number;
   // Knight positions. p1 starts on the puzzle start, p2 on the end (locked
   // decision 3). In C1 they never move; C2 will mutate these on validated hops.
   readonly knights: { p1: Cell; p2: Cell };
@@ -146,8 +151,17 @@ export class Game {
     readonly players: { p1: GamePlayer; p2: GamePlayer },
     seed: number = randomSeed(),
     stepMs: number = PLAYBACK_STEP_MS,
+    // Requested board size + path length. Default to the first-board params; the
+    // server CLAMPS both before generating (never trusts the caller's range).
+    n: number = BOARD_N,
+    steps: number = BOARD_STEPS,
   ) {
-    this.puzzle = generatePuzzle(BOARD_N, BOARD_STEPS, seed);
+    // Clamp n FIRST, then steps against the clamped n (steps' upper bound is
+    // maxSteps(n) = n*n-1). Mirrors knights-puzzle's customSettings discipline.
+    const cn = clampN(n);
+    const cSteps = clampSteps(cn, steps);
+    this.steps = cSteps;
+    this.puzzle = generatePuzzle(cn, cSteps, seed);
     const start: Cell = { r: this.puzzle.start.r, c: this.puzzle.start.c };
     const end: Cell = { r: this.puzzle.end.r, c: this.puzzle.end.c };
     this.knights = { p1: start, p2: end };
@@ -517,7 +531,7 @@ export class Game {
     const p = this.puzzle;
     return {
       n: p.n,
-      steps: BOARD_STEPS,
+      steps: this.steps,
       seed: p.seed,
       available: p.available.map((row) => row.slice()),
       start: { r: p.start.r, c: p.start.c },
