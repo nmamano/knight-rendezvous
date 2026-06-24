@@ -236,8 +236,63 @@ round-trip-chess 111/111 (incl. real-WS integration).
 - **Locked (don't relitigate):** locked decisions 1–9 above.
 - **Resources:** see Resources section; clone chess scaffold + port knight engine.
 
+## SLICE-2 PICKUP (C2 — independent live movement + sync) — authored after C1
+- **Baseline commit:** `054639f` (C1).
+- **What C1 taught (fold in):**
+  - Server is the sole oracle; `server/game.ts` `board()`/`snapshot()` hand-builds
+    the projection and OMITS `path`. Keep extending that projection — never leak
+    `path`; the integration + smoke `"path"`-substring guards must stay green.
+  - `Game` already holds `visited: { p1:[start], p2:[end] }` — build movement on it.
+  - **No-reuse spans BOTH knights** (locked #2): a target must be unvisited by
+    EITHER knight and not the other knight's current square (the rendezvous hop is
+    C3 — for C2, reject landing on the other knight).
+  - **Not turn-based** (locked #4): the room is single-threaded, so natural message
+    ordering gives "first valid wins"; the later concurrent move that's now illegal
+    just gets an error. C1's `socket.ts` has NO move message / per-action error code
+    yet — C2 adds them.
+  - Frontend: `data-cell="${r}-${c}"` and `data-knight` exist in Board.tsx;
+    `window.__KR__` is FLAT (spreads the snapshot, e.g. `__KR__.board`). No
+    optimistic UI — render only on server `state` (chess pattern).
+  - Board params locked `n=6, steps=18` (config.ts); the known-board engine test
+    pins seed 12345 → start{5,1}/end{4,2}/19 cells — don't break it.
+  - `colorOf` is duplicated (module fn + `Game.colorOf` + `Room.colorOf`) — consider
+    collapsing this slice.
+- **Goal:** each player hops their OWN knight to a legal knight-move square (not
+  turn-based); server validates + updates authoritative state + broadcasts; both
+  clients see both knights move and both trails render. NO win/rendezvous yet (C3).
+- **Load-bearing mechanics / traps:**
+  - Add `ClientMsg` `move{ cell: Cell }`; infer the player from their bound slot
+    (like chess infers pid from the connection). Server validates: it is that
+    player's knight; `cell` is a legal knight move from that knight's current cell;
+    `cell` is `available`; `cell` is NOT in `union(visited.p1, visited.p2)`; `cell`
+    is NOT the other knight's current square. On success: push current→visited, move
+    the knight, broadcast.
+  - Add `ErrorCode` `illegal_move`. Stale-socket guard stays (act only if
+    `slot.conn === conn`).
+  - Extend `RoomSnapshot` to carry trails: `visited: { p1: Cell[]; p2: Cell[] }`.
+    Keep `path` server-side.
+  - Frontend: clickable cells → send `move`; render each player's trail in its color
+    (amber/violet) — port knights-puzzle's SVG polyline trail or a simple themed
+    cell tint. Legal-move highlight (from shared `legalMoves`) is a nice-to-have.
+- **Acceptance criteria:**
+  - Always-run gates green.
+  - Integration test: each client moves its own knight several legal hops; both
+    snapshots reflect both trails identically; illegal moves rejected (wrong owner,
+    non-knight-move, onto a visited cell, onto the other knight, off-board/blocked);
+    two concurrent moves to the same target → exactly one wins, the other errors.
+  - Dual-client smoke: both contexts perform a legal hop; assert via server /
+    `window.__KR__` that both knights + trails advanced identically on both clients.
+- **Decide-with-(diff-gate)-subagent:** exact snapshot shape for trails; whether to
+  compute client-side legal-move highlights from the shared engine.
+- **Locked (don't relitigate):** decisions 1–9, especially #2 (no-reuse spans both)
+  and #4 (not turn-based, first-valid-wins). **Rendezvous / same-square win is C3 —
+  do NOT implement win in C2.**
+- **Resources:** `shared/engine.ts` `legalMoves`; `server/game.ts` (add `move()`);
+  `round-trip-chess/server/rooms.ts` `Room.move` + broadcast pattern (mirror it,
+  minus turn ownership); chess `frontend/.../Game.tsx` for click→move handling shape.
+
 ## SLICE-N PICKUP — authored when N-1 commits
-> Author the next slice's handoff only AFTER the previous one commits, folding in a
+> Author each next handoff only AFTER the previous one commits, folding in a
 > "what slice N-1 taught" block at the top. That is where workflow knowledge
 > compounds.
 
