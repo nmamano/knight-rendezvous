@@ -572,6 +572,80 @@ try {
     throw new Error("post-win snapshot leaked the witness path");
   }
 
+  // ---- C6: NEW PUZZLE (room-wide reset) — both contexts get a fresh identical
+  // board with knights reset to start/end. Drive the real "New puzzle" button on
+  // context A (it is enabled on the WIN screen by its own enable rule). Judge via
+  // the server-authoritative window.__KR__ on BOTH contexts.
+  await pageA.getByRole("button", { name: "New puzzle" }).click();
+  // Wait for BOTH contexts to leave the won state: a fresh "playing" board with
+  // both trails collapsed to their singleton starts (knights on start/end).
+  for (const page of [pageA, pageB]) {
+    await page.waitForFunction(
+      () => {
+        const s = window.__KR__;
+        return (
+          s &&
+          s.status === "playing" &&
+          s.result === null &&
+          s.visited &&
+          s.visited.p1.length === 1 &&
+          s.visited.p2.length === 1 &&
+          s.knights &&
+          s.board &&
+          s.knights.p1.r === s.board.start.r &&
+          s.knights.p1.c === s.board.start.c &&
+          s.knights.p2.r === s.board.end.r &&
+          s.knights.p2.c === s.board.end.c
+        );
+      },
+      { timeout: 15000 },
+    );
+  }
+  const freshA = await pageA.evaluate(() => ({
+    board: window.__KR__.board,
+    knights: window.__KR__.knights,
+    visited: window.__KR__.visited,
+    status: window.__KR__.status,
+    result: window.__KR__.result,
+  }));
+  const freshB = await pageB.evaluate(() => ({
+    board: window.__KR__.board,
+    knights: window.__KR__.knights,
+    visited: window.__KR__.visited,
+    status: window.__KR__.status,
+    result: window.__KR__.result,
+  }));
+  // The fresh board must be BYTE-IDENTICAL across the two contexts (seed +
+  // available + start + end + knights + visited). We do NOT assert it differs
+  // from the previous board — randomSeed can repeat.
+  if (JSON.stringify(freshA) !== JSON.stringify(freshB)) {
+    throw new Error(
+      `newPuzzle board differs between contexts:\n  A=${JSON.stringify(freshA)}\n  B=${JSON.stringify(freshB)}`,
+    );
+  }
+  if (freshA.status !== "playing" || freshA.result !== null) {
+    throw new Error(`newPuzzle did not reset to a fresh playing board: ${JSON.stringify(freshA)}`);
+  }
+  if (JSON.stringify(freshA).includes('"path"')) {
+    throw new Error("newPuzzle board leaked the witness path");
+  }
+
+  // ---- C6: outbound cross-link to Knight's Puzzle must be present in the DOM.
+  const kpLink = await pageA.locator('a[href="https://knight.nilmamano.com"]').count();
+  if (kpLink < 1) {
+    throw new Error("outbound Knight's Puzzle link is missing from the DOM");
+  }
+
+  // ---- C6: branding assets must RESOLVE from the served dist build (not 404).
+  // The defensive console-noise filter stays, but here we assert the assets
+  // explicitly so a missing favicon/og can never be masked as "expected noise".
+  for (const asset of ["/favicon.svg", "/og.png"]) {
+    const res = await fetch(`${URL}${asset}`);
+    if (res.status !== 200) {
+      throw new Error(`asset ${asset} did not resolve: HTTP ${res.status}`);
+    }
+  }
+
   if (pageErrors.length) {
     throw new Error("pageerrors: " + pageErrors.join("; "));
   }
@@ -600,6 +674,10 @@ try {
         c4OtherPlayerUntouched: true,
         c5ViewSolutionRestored: true,
         c5HintActorOnly: true,
+        c6NewPuzzleReset: true,
+        c6NewPuzzleSeed: freshA.board.seed,
+        c6OutboundLinkPresent: true,
+        c6AssetsResolve: true,
         chrome: browser.version(),
       },
       null,

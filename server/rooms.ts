@@ -271,6 +271,40 @@ export class Room {
     conn.send({ t: "hint", ...res });
   }
 
+  /**
+   * Reset the WHOLE room to a FRESH random puzzle (C6, locked decision 5). Mirrors
+   * the PLUMBING of viewSolution/retry: stale-socket guard (a replaced socket
+   * silently no-ops), no game silently no-ops. Unlike move/retry/undo it carries
+   * NO win-gate and NO bad_phase error — newPuzzle is a RESET, allowed while
+   * "playing" OR "won", and it CANCELS a running playback rather than rejecting.
+   *
+   * Order is load-bearing:
+   *   (1) clearPlaybackTimer() FIRST (timer-leak discipline, same as teardown):
+   *       any in-flight playback tick is stopped before we drop the old Game, so a
+   *       late tick can never apply a frame onto / broadcast the new Game.
+   *   (2) Build a FRESH Game REUSING the same slot.player references (so presence
+   *       keeps propagating) and the same stepMs. The constructor's default seed
+   *       (randomSeed()) picks a new random puzzle; status/result/visited/knights
+   *       all reset in the constructor — we never reassign readonly fields on the
+   *       old instance.
+   *   (3) broadcast() the new identical board to both clients.
+   */
+  newPuzzle(pid: PlayerId, conn: Connection): void {
+    const slot = this.slots[pid];
+    if (!slot || slot.conn !== conn) return; // a replaced/stale socket may not act
+    if (!this.game) return;
+    // (1) cancel any running playback BEFORE swapping the game (teardown discipline).
+    this.clearPlaybackTimer();
+    // (2) fresh game: same player refs + same stepMs; constructor default = new seed.
+    this.game = new Game(
+      { p1: this.slots.p1!.player, p2: this.slots.p2!.player },
+      undefined,
+      this.stepMs,
+    );
+    // (3) push the new identical board to both clients.
+    this.broadcast();
+  }
+
   // ---- presence / teardown ---------------------------------------------
 
   /** Called when a socket closes. `conn` guards against a stale (replaced) socket. */

@@ -103,6 +103,13 @@ export type ClientMsg =
   // ACTOR-ONLY (a `hint` ServerMsg sent to the requester alone), never broadcast.
   // Only meaningful while "playing".
   | { t: "hint" }
+  // Reset the WHOLE room to a FRESH random puzzle (C6, locked decision 5: this
+  // keeps us within the single random-puzzle screen — no levels/catalog). No
+  // payload (room-wide, not per-player). It is a RESET, not a win-gated rematch:
+  // allowed while "playing" OR "won", and during "playback" the server cancels
+  // the running playback first, then regenerates. Both clients re-render the new
+  // identical board; the witness `path` stays server-side.
+  | { t: "newPuzzle" }
   | { t: "leave" };
 
 // ---- server → client -------------------------------------------------------

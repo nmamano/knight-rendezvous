@@ -7,7 +7,7 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import app from "../server/index.ts";
 import type { Board, ClientMsg, ServerMsg } from "../shared/protocol";
-import { knightMoves, type Cell } from "../shared/engine";
+import { generatePuzzle, knightMoves, type Cell } from "../shared/engine";
 
 type OfType<K extends ServerMsg["t"]> = Extract<ServerMsg, { t: K }>;
 
@@ -1482,6 +1482,173 @@ describe("C5 view-solution + hint (real WS)", () => {
     // whole path — and the off_path branch never carries a cell either.
     expect(h.status).toBe("prefix");
     expect(h.status === "prefix" && isLegalNext(init, init.knights.p1, h.cell)).toBe(true);
+    p1.close();
+    p2.close();
+  });
+});
+
+// ---- C6: new puzzle (room-wide reset) --------------------------------------
+
+describe("C6 newPuzzle (real WS)", () => {
+  // Assert a fresh board is fully reset and BYTE-IDENTICAL across the two clients.
+  // We deliberately do NOT assert the new seed differs from the previous one —
+  // randomSeed can repeat — only that the two clients agree and everything reset.
+  function assertFreshAndIdentical(
+    s1: ReturnType<typeof activeState>,
+    s2: ReturnType<typeof activeState>,
+  ) {
+    // Byte-identical across the two clients (seed/available/start/end via board,
+    // plus knights + visited).
+    expect(JSON.stringify(s1)).toBe(JSON.stringify(s2));
+    // Full reset: a fresh playing board with no result.
+    expect(s1.status).toBe("playing");
+    expect(s1.result).toBeNull();
+    // Knights back on the endpoints, trails back to the singleton starts.
+    expect(s1.knights.p1).toEqual(s1.board.start);
+    expect(s1.knights.p2).toEqual(s1.board.end);
+    expect(s1.visited.p1).toEqual([s1.board.start]);
+    expect(s1.visited.p2).toEqual([s1.board.end]);
+    // Optional soft check: the broadcast board EQUALS generatePuzzle for its own
+    // seed (proves genuine regeneration, not a stale board). steps echoes config.
+    const regen = generatePuzzle(s1.board.n, s1.board.steps, s1.board.seed);
+    expect(s1.board.available).toEqual(regen.available.map((row) => row.slice()));
+    expect(s1.board.start).toEqual({ r: regen.start.r, c: regen.start.c });
+    expect(s1.board.end).toEqual({ r: regen.end.r, c: regen.end.c });
+  }
+
+  test("newPuzzle while playing → both clients get a NEW identical board, fully reset", async () => {
+    const { p1, p2, init } = await activeGame();
+    // Move both knights so the pre-reset state is non-trivial.
+    const path = reconstructPath(init.board, init.knights.p1, init.knights.p2);
+    const last = path.length - 1;
+    for (let j = 1; j <= 2; j++) {
+      p1.send({ t: "move", cell: path[j] });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, path[j]));
+    }
+    p2.send({ t: "move", cell: path[last - 1] });
+    await awaitMoveApplied(p1, p2, (v) => inCells(v.p2, path[last - 1]));
+
+    // newPuzzle broadcasts exactly ONE fresh state per client. Wait for the count
+    // to tick up, then read each client's LATEST state (the reset). We read last()
+    // rather than a content predicate because randomSeed can repeat, so the new
+    // board is not guaranteed to differ from the old by any single field.
+    const baseCount1 = p1.states().length;
+    const baseCount2 = p2.states().length;
+    p1.send({ t: "newPuzzle" });
+    const r1 = await awaitStateCount(p1, baseCount1 + 1);
+    const r2 = await awaitStateCount(p2, baseCount2 + 1);
+    assertFreshAndIdentical(r1, r2);
+    p1.close();
+    p2.close();
+  });
+
+  test("newPuzzle DURING playback → playback canceled (no late frames) and reset to a fresh playing board", async () => {
+    const { p1, p2 } = await activeGame();
+    p1.send({ t: "viewSolution" });
+    await p1.waitFor("state", (m) => m.state.status === "playback");
+    await p2.waitFor("state", (m) => m.state.status === "playback");
+
+    // Reset mid-playback. The Room clears the playback timer FIRST (so no frame
+    // fires AFTER the reset), then swaps in a fresh game → the reset broadcast is
+    // "playing". A stray playback frame (KR_PLAYBACK_STEP_MS=1) can still arrive
+    // BEFORE the reset is processed, so we don't key on "exactly +1"; instead we
+    // wait until each client's LATEST state is "playing" with a NEW broadcast past
+    // the reset send. Once playback is canceled the newest state stays "playing".
+    const beforeReset1 = p1.states().length;
+    const beforeReset2 = p2.states().length;
+    p1.send({ t: "newPuzzle" });
+    await p1.waitFor(
+      "state",
+      () =>
+        p1.states().length > beforeReset1 && activeState(p1.last("state")!).status === "playing",
+    );
+    await p2.waitFor(
+      "state",
+      () =>
+        p2.states().length > beforeReset2 && activeState(p2.last("state")!).status === "playing",
+    );
+    const r1 = activeState(p1.last("state")!);
+    const r2 = activeState(p2.last("state")!);
+    expect(r1.status).toBe("playing");
+    expect(r2.status).toBe("playing");
+    assertFreshAndIdentical(r1, r2);
+
+    // No LATE playback frame may arrive after the reset (the timer was canceled).
+    // Prove the reset broadcast was fully processed, then assert no "playback"
+    // state appears afterward. We ping with a bad_message we can await, then check.
+    const countAfterReset = p1.states().length;
+    p1.send({ t: "nope" } as unknown as ClientMsg);
+    await p1.waitFor("error", (m) => m.code === "bad_message");
+    const tail = p1.states().slice(countAfterReset);
+    expect(tail.every((m) => m.state.status !== "playback")).toBe(true);
+    expect(activeState(p1.last("state")!).status).toBe("playing");
+    p1.close();
+    p2.close();
+  });
+
+  test("newPuzzle AFTER a win → resets to a fresh playing board on both clients", async () => {
+    const { p1, p2, init } = await activeGame();
+    const board = init.board;
+    // Drive p1 onto stationary p2 → rendezvous win.
+    const target = init.knights.p2;
+    const bfsPath = bfsToAdjacent(board, init.knights.p1, target)!;
+    for (const step of bfsPath) {
+      p1.send({ t: "move", cell: step });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, step));
+    }
+    p1.send({ t: "move", cell: target });
+    await p1.waitFor("state", (m) => m.state.status === "won");
+    await p2.waitFor("state", (m) => m.state.status === "won");
+
+    // newPuzzle is NOT win-gated (it is a reset): from the win screen it resets.
+    // One fresh broadcast per client; read each client's latest.
+    const before1 = p1.states().length;
+    const before2 = p2.states().length;
+    p2.send({ t: "newPuzzle" });
+    const r1 = await awaitStateCount(p1, before1 + 1);
+    const r2 = await awaitStateCount(p2, before2 + 1);
+    expect(r1.status).toBe("playing");
+    expect(r1.result).toBeNull();
+    assertFreshAndIdentical(r1, r2);
+    // No error came back for the reset request.
+    expect(p2.last("error")).toBeNull();
+    p1.close();
+    p2.close();
+  });
+
+  test('the witness path NEVER leaks across a newPuzzle round-trip: no "path" in any message', async () => {
+    const { p1, p2, init } = await activeGame();
+    // A couple of moves, then a reset, then another move on the fresh board.
+    const t1 = legalTarget(
+      init.board,
+      init.knights.p1,
+      init.visited.p1,
+      init.visited.p2,
+      init.knights.p2,
+    )!;
+    p1.send({ t: "move", cell: t1 });
+    await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, t1));
+
+    const before1 = p1.states().length;
+    const before2 = p2.states().length;
+    p1.send({ t: "newPuzzle" });
+    const fs = await awaitStateCount(p1, before1 + 1);
+    await awaitStateCount(p2, before2 + 1);
+    expect(fs.status).toBe("playing");
+    expect(fs.visited.p1.length).toBe(1);
+
+    // A legal move on the NEW board (uses the fresh board/knights).
+    const t2 = legalTarget(fs.board, fs.knights.p1, fs.visited.p1, fs.visited.p2, fs.knights.p2);
+    if (t2) {
+      p1.send({ t: "move", cell: t2 });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, t2));
+    }
+
+    // No serialized message on EITHER client contains a raw "path" field.
+    const noPath = (c: Client) =>
+      c.allMessages().every((m) => !JSON.stringify(m).includes('"path"'));
+    expect(noPath(p1)).toBe(true);
+    expect(noPath(p2)).toBe(true);
     p1.close();
     p2.close();
   });

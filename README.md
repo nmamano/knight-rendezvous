@@ -14,7 +14,9 @@ square**. Move freely, no turns.
 Built via a gated slice loop — see [`plans/knight-rendezvous-loop.md`](plans/knight-rendezvous-loop.md).
 
 ## Status
-C5 done — "View solution" plays the full meet-in-the-middle animation on both
-screens then returns the game exactly where it was (never marks it solved), and
-"Hint" privately nudges only the asking player's knight along the solution.
-Next: C6 (polish, mobile, "new puzzle", cross-link to Knight's Puzzle).
+**Build phase complete (C1–C6).** Pairing, two-knight movement, same-square
+rendezvous win, per-player retry/undo, view-solution (both clients) + hint, plus
+branding, a "New puzzle" button, opponent-left/reconnect UX, responsive controls,
+and an outbound link to Knight's Puzzle. All gates green (58 tests + dual-client
+smoke). Remaining: **C7 — deploy** (fly.io, GitHub repo, subdomain, KP back-link)
+— human-gated, runs as Nil; see `plans/knight-rendezvous-loop.md`.

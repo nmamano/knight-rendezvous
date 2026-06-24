@@ -142,7 +142,7 @@ DNS / custom subdomain changes      # runs as Nil
   locked decision 1); soft vs perfect; win panel on both clients.
 - [x] **C4 — Retry + Undo (per-player).** Per locked decision 6.
 - [x] **C5 — View solution (both) + Hint (per-player).** Per locked decision 7.
-- [ ] **C6 — Polish + cross-links + meta.** Name applied, OG/favicon, "new random
+- [x] **C6 — Polish + cross-links + meta.** Name applied, OG/favicon, "new random
   puzzle" button, opponent-left/reconnect UX, mobile, link to/from knights-puzzle.
 - [ ] **C7 (optional, human-gated) — Deploy.** Finalize Dockerfile/fly.toml, create
   GitHub repo, deploy, custom subdomain, add back-link into knights-puzzle repo +

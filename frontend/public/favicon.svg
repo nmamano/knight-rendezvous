@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="7" fill="#6c5cff" />
+  <text
+    x="10"
+    y="24"
+    font-size="20"
+    text-anchor="middle"
+    fill="#f6a609"
+    stroke="#2b2640"
+    stroke-width="0.8"
+    paint-order="stroke"
+    font-family="Georgia, 'Times New Roman', serif"
+  >♞</text>
+  <text
+    x="22"
+    y="24"
+    font-size="20"
+    text-anchor="middle"
+    fill="#8b5cf6"
+    stroke="#2b2640"
+    stroke-width="0.8"
+    paint-order="stroke"
+    font-family="Georgia, 'Times New Roman', serif"
+  >♞</text>
+</svg>

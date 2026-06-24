@@ -196,6 +196,16 @@ export function registerSocket(app: Hono, store: RoomStore) {
             b.room.hint(b.pid, conn);
             return;
           }
+          case "newPuzzle": {
+            // No payload validation: newPuzzle carries no fields beyond `t`. The
+            // player is inferred from the bound slot; it is a room-wide RESET (not
+            // win-gated), so the Room handles it while playing OR won, canceling
+            // any running playback first.
+            const b = active();
+            if (!b) return;
+            b.room.newPuzzle(b.pid, conn);
+            return;
+          }
           case "leave": {
             const b = active();
             if (b) b.room.leave(b.pid, conn);

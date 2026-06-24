@@ -269,6 +269,14 @@ export function App() {
     netRef.current?.send({ t: "hint" });
   }, []);
 
+  // C6 — New puzzle (room-wide reset, locked decision 5). No optimistic UI: the
+  // server regenerates the board and broadcasts; the WinPanel disappears and the
+  // board becomes interactive again purely from the resulting server `state`.
+  const newPuzzle = useCallback(() => {
+    setError(null);
+    netRef.current?.send({ t: "newPuzzle" });
+  }, []);
+
   const exit = useCallback(() => {
     netRef.current?.send({ t: "leave" });
     clearSession();
@@ -310,6 +318,14 @@ export function App() {
     const atStart = myTrailLen <= 1;
     const undoDisabled = locked || atStart;
     const retryDisabled = locked || atStart;
+    // C6 — "New puzzle" has its OWN enable rule: a room-wide RESET, allowed while
+    // "playing" OR "won" (so it works on the win screen — folding it under the
+    // shared `locked` predicate would wrongly disable it there), DISABLED only
+    // during "playback".
+    const newPuzzleDisabled = !(snapshot.status === "playing" || snapshot.status === "won");
+    // Connection / presence banners (C6). Once a game is active we show whether
+    // the opponent is mid grace-window (reconnect pending) vs gone for good.
+    const oppConnected = opp ? opp.connected : true;
     view = (
       <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col items-center justify-center gap-6 px-4 py-10 text-center">
         <h1 className="text-3xl font-extrabold tracking-tight" style={{ color: "#3a3357" }}>
@@ -337,7 +353,7 @@ export function App() {
             won or you are already at your start — but those are UX hints only; the
             server guards are the authority (no optimistic UI). The look ports
             knights-puzzle's pill/shadow/handwritten controls into KR's Tailwind. */}
-        <div className="flex items-center justify-center gap-3">
+        <div className="flex flex-wrap items-center justify-center gap-3">
           <button
             type="button"
             onClick={retry}
@@ -374,6 +390,19 @@ export function App() {
           >
             View solution
           </button>
+          {/* C6 — New puzzle: room-wide reset (locked decision 5). Its OWN enable
+              rule (playing OR won; disabled only during playback) so it stays
+              clickable on the win screen. Accent-filled to read as the primary
+              "play again" affordance. No optimistic UI — the server resets. */}
+          <button
+            type="button"
+            onClick={newPuzzle}
+            disabled={newPuzzleDisabled}
+            className="rounded-full border-2 border-[var(--accent)] bg-[var(--accent)] px-5 py-2 text-lg font-bold text-white shadow-[0_4px_0_0_#c9bdf4] transition hover:brightness-105 active:translate-y-0.5 active:shadow-[0_2px_0_0_#c9bdf4] disabled:cursor-not-allowed disabled:opacity-50 disabled:active:translate-y-0 disabled:active:shadow-[0_4px_0_0_#c9bdf4]"
+            style={{ fontFamily: "var(--display)" }}
+          >
+            New puzzle
+          </button>
         </div>
         {playback && (
           <p
@@ -401,11 +430,41 @@ export function App() {
             win!
           </p>
         ) : null}
-        {opponentLeft && (
-          <p className="rounded-2xl bg-[#9a4a4a]/10 px-4 py-2 text-sm font-semibold text-[#9a4a4a]">
-            Your opponent left the room.
+        {/* C6 presence/reconnect UX. While the opponent is mid grace-window
+            (still in the room but their socket dropped) we show a soft "waiting
+            to return" banner; once they leave for good the server sends
+            opponentLeft and we show the firm "left the room" banner. The
+            opponentLeft message wins (it is terminal). */}
+        {opponentLeft ? (
+          <p
+            role="status"
+            data-opponent="left"
+            className="rounded-2xl bg-[#9a4a4a]/10 px-4 py-2 text-sm font-semibold text-[#9a4a4a]"
+          >
+            Your opponent left the room. Start a new game to play again.
           </p>
-        )}
+        ) : opp && !oppConnected ? (
+          <p
+            role="status"
+            data-opponent="waiting"
+            className="rounded-2xl bg-[#9a7a2a]/10 px-4 py-2 text-sm font-semibold text-[#8a6a1a]"
+          >
+            Waiting for {opp.name} to return…
+          </p>
+        ) : null}
+        {/* C6 outbound cross-link ONLY (rail #2): a tiny "more games" link back to
+            Knight's Puzzle. The KP→KR back-link is C7 (edits the KP repo). */}
+        <footer className="pt-2 text-xs text-[#8b86a0]">
+          <a
+            href="https://knight.nilmamano.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-semibold text-[var(--accent)] underline-offset-2 hover:underline"
+          >
+            ↩ Knight&apos;s Puzzle
+          </a>{" "}
+          — more cozy knight games
+        </footer>
       </main>
     );
   }
