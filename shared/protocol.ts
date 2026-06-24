@@ -1,0 +1,78 @@
+// The client⇄server wire protocol. Imported by both the server and the frontend,
+// so it must stay browser-safe: types only, plus the pure engine types.
+//
+// Knight Rendezvous is a server-authoritative co-op game. It is NOT turn-based,
+// and (unlike chess) carries no turn/phase machinery in C1 — both players will
+// later move freely (C2+). The server is the only oracle: it picks the random
+// seed and broadcasts the FULL (n, steps, seed) triple plus the derived board so
+// any client or test reproduces the identical board deterministically.
+
+import type { Cell } from "./engine";
+
+export type PlayerId = "p1" | "p2";
+
+// Distinct knight + trail colors, one per player. p1 = amber, p2 = violet.
+export type ColorToken = "amber" | "violet";
+
+// Room lifecycle. "waiting" = no opponent yet (no puzzle generated; board and
+// knights are null); "active" = both players present and the puzzle is live.
+export type LobbyPhase = "waiting" | "active";
+
+export interface PlayerView {
+  id: PlayerId;
+  color: ColorToken; // p1 = amber, p2 = violet
+  name: string;
+  connected: boolean;
+}
+
+/**
+ * The full public board, carried on the wire so any client/test can reproduce it
+ * deterministically: the (n, steps, seed) triple regenerates the SAME puzzle, and
+ * available/start/end are sent alongside so a client need not even run the engine
+ * to render it.
+ *
+ * The witness `path` is deliberately NOT here — it stays server-side only.
+ */
+export interface Board {
+  n: number;
+  steps: number;
+  seed: number;
+  available: boolean[][];
+  start: Cell;
+  end: Cell;
+}
+
+/**
+ * The full, player-AGNOSTIC view of a room the server broadcasts to every client.
+ * One identical snapshot is sent to both players; per-client identity (your
+ * PlayerId and reconnect token) is delivered once, in `joined`.
+ *
+ * `board` and `knights` are null while waiting and both set once active. p1's
+ * knight starts on board.start, p2's on board.end (see game.ts).
+ */
+export interface RoomSnapshot {
+  code: string;
+  lobby: LobbyPhase;
+  players: PlayerView[];
+  board: Board | null;
+  knights: { p1: Cell; p2: Cell } | null;
+}
+
+// ---- client → server -------------------------------------------------------
+
+export type ClientMsg =
+  | { t: "create"; name?: string }
+  | { t: "join"; code: string; name?: string }
+  | { t: "reconnect"; code: string; token: string }
+  | { t: "leave" };
+
+// ---- server → client -------------------------------------------------------
+
+export type ErrorCode = "room_not_found" | "room_full" | "bad_token" | "bad_message";
+
+export type ServerMsg =
+  // `you` and `token` are returned ONLY here — never in a broadcast.
+  | { t: "joined"; code: string; you: PlayerId; token: string; state: RoomSnapshot }
+  | { t: "state"; state: RoomSnapshot } // pushed on every transition
+  | { t: "opponentLeft" }
+  | { t: "error"; code: ErrorCode; message: string };

@@ -14,4 +14,5 @@ square**. Move freely, no turns.
 Built via a gated slice loop — see [`plans/knight-rendezvous-loop.md`](plans/knight-rendezvous-loop.md).
 
 ## Status
-Scaffolding in progress (slice C1).
+C1 done — pairing + identical server-generated board with two distinctly-colored
+knights (P1 amber on start, P2 violet on end). Next: C2 (live independent movement).

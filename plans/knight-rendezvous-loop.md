@@ -129,7 +129,7 @@ DNS / custom subdomain changes      # runs as Nil
 ---
 
 ## Slice plan
-- [ ] **C1 — Pair + identical board, two knights, no movement.** fly-shaped
+- [x] **C1 — Pair + identical board, two knights, no movement.** fly-shaped
   monorepo scaffold (`server/ shared/ frontend/`), knight engine ported into
   `shared/`, Hono WS create/join/reconnect + share link, server generates a random
   puzzle (seed) and broadcasts the SAME board; both browsers render the grass/hedge

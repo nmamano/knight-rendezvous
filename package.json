@@ -1,0 +1,32 @@
+{
+  "name": "knight-rendezvous",
+  "module": "shared/engine.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run server/index.ts",
+    "dev": "bun run --hot server/index.ts",
+    "test": "bun test tests/",
+    "build": "bun --cwd=frontend run build",
+    "format": "bun x prettier --write .",
+    "format:check": "bun x prettier --check .",
+    "lint": "bun x eslint .",
+    "typecheck": "bun x tsc --noEmit -p tsconfig.json && bun --cwd=frontend x tsc --noEmit",
+    "ci": "bun run format:check && bun run lint && bun run typecheck && bun run test && bun run build",
+    "smoke": "bun run build && bun scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/bun": "latest",
+    "eslint": "^9.39.1",
+    "globals": "^16.5.0",
+    "playwright": "^1.61.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.48.0"
+  },
+  "dependencies": {
+    "hono": "^4.12.23",
+    "nanoid": "^5.1.11"
+  }
+}

@@ -1,0 +1,132 @@
+@import "tailwindcss";
+
+/* ===========================================================================
+   Knight Rendezvous theme.
+
+   The BOARD is ported straight from knights-puzzle (grass/hedge field, flat
+   edge-to-edge grid, lavender accent). The lobby/waiting chrome uses Tailwind
+   utilities over the same palette. Both knights are rendered as overlay pieces
+   in DISTINCT colors: p1 = amber, p2 = violet (locked decision 3).
+   =========================================================================== */
+
+:root {
+  /* Validity axis: open GRASS (playable) vs dark HEDGE (blocked) — from KP. */
+  --grass: #97d36d; /* playable: bright open grass */
+  --hedge: #38492f; /* blocked: clearly darker + sunken */
+  --path: #e8c892; /* visited trail base (KP) */
+  --checker: rgba(0, 0, 0, 0.08);
+  --grid: rgba(32, 54, 26, 0.32);
+  --frame: #4d7c3c;
+
+  /* Identity accent (KP lavender). */
+  --accent: #6c5cff;
+  --ink: #2b2640;
+
+  /* Distinct knight colors. */
+  --amber: #f6a609; /* p1 */
+  --amber-ink: #5a3b00;
+  --violet: #8b5cf6; /* p2 */
+  --violet-ink: #2e1065;
+
+  --display: "Patrick Hand", "Segoe UI", system-ui, sans-serif;
+  --body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  color-scheme: light;
+}
+
+@layer base {
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: var(--body);
+    color: var(--ink);
+    background: radial-gradient(1100px 560px at 50% -10%, #efeaff 0%, #f2f0fa 60%);
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* ---- Board (ported from knights-puzzle/src/index.css) --------------------- */
+
+.board-wrap {
+  position: relative;
+  width: fit-content;
+  max-width: 92vw;
+  margin: 0 auto;
+}
+
+/* Flat, edge-to-edge field: 1px gaps reveal the grid-line color beneath; a solid
+   frame surrounds it. No rounded, separated cells. */
+.board {
+  display: grid;
+  gap: 1px;
+  padding: 0;
+  background: var(--grid);
+  border: 5px solid var(--frame);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 12px 28px rgba(40, 60, 30, 0.22);
+}
+
+.cell {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  width: 100%;
+  height: auto;
+  container-type: size;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+}
+
+/* Axis 1 — validity (the strongest signal). */
+.cell.open {
+  background: var(--grass);
+}
+.cell.blocked {
+  background: var(--hedge);
+  box-shadow: inset 0 3px 7px rgba(0, 0, 0, 0.4);
+}
+
+/* Axis 2 — checker: a quiet wash on every dark square. */
+.cell.dark::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--checker);
+  pointer-events: none;
+}
+
+/* Endpoint glyphs (start ◎ / end 🏁), matching KP. */
+.glyph {
+  position: relative;
+  z-index: 1;
+  font-size: 40cqmin;
+  line-height: 1;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.22));
+}
+
+/* The two knights, as overlay pieces positioned over the grid. */
+.piece-layer {
+  position: absolute;
+  inset: 5px;
+  pointer-events: none;
+  z-index: 2;
+  container-type: size;
+}
+.piece {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  font-size: calc(82cqmin / var(--n));
+  line-height: 1;
+  filter: drop-shadow(0 2px 2px rgba(0, 0, 0, 0.3));
+}
+.piece.amber {
+  color: var(--amber);
+  -webkit-text-stroke: 1.4px var(--amber-ink);
+}
+.piece.violet {
+  color: var(--violet);
+  -webkit-text-stroke: 1.4px var(--violet-ink);
+}

@@ -1,0 +1,7 @@
+**/dist/
+**/node_modules/
+bun.lock
+
+# Owned by Nil — left as-authored, not reformatted by the loop.
+plans/
+README.md
