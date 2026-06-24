@@ -291,6 +291,67 @@ round-trip-chess 111/111 (incl. real-WS integration).
   `round-trip-chess/server/rooms.ts` `Room.move` + broadcast pattern (mirror it,
   minus turn ownership); chess `frontend/.../Game.tsx` for click→move handling shape.
 
+## SLICE-3 PICKUP (C3 — rendezvous / same-square win) — authored after C2
+- **Baseline commit:** `b160c8f` (C2).
+- **What C2 taught (fold in):**
+  - **The flip-point is `server/game.ts` check (d)** (the "cannot land on the other
+    knight" branch). It is isolated, named, and anchored by the dedicated test
+    "reject landing on the OTHER knight's current cell". C3 flips THIS branch into
+    the win, and must INVERT/REPLACE that test (the rule reverses).
+  - **Ordering trap:** check (c) "not visited by either" runs BEFORE (d), and the
+    other knight's current cell is the last entry of its own trail → (c) already
+    rejects it. To ALLOW the rendezvous hop, C3 must put the "target === other
+    knight's current cell" win-check AHEAD of (c) as the SOLE allowed exception to
+    no-reuse (locked #1). Still require (a) legal knight move + (b) in-bounds.
+  - The snapshot already carries `visited` for both knights → soft-vs-perfect is
+    computable server-side from `union(visited.p1, visited.p2)` vs the `available`
+    cells; no new wire field needed for DETECTION (but a win STATUS field is needed).
+  - Concurrency: room is single-threaded → first-valid-wins holds. Distinguish
+    two-knights-to-the-same-EMPTY-cell (still illegal) from one-knight-ONTO-the-other
+    (the rendezvous). After a win, further moves must be rejected/ignored.
+  - `window.__KR__` spreads the snapshot (new status field auto-exposed). No
+    optimistic UI — render only on server `state`.
+  - Deferred-but-noted: `colorOf` triplication; `Board.tsx` `cellKey` uses
+    `r*1000+c` vs `r*n+c` elsewhere (harmless). Don't let these block C3.
+- **Goal:** detect the rendezvous (one knight hops onto the other knight's current
+  square — SAME square per locked #1) → game over on BOTH clients with a win panel.
+  **Soft win** = rendezvous; **perfect win** = rendezvous AND every playable square
+  covered by ≥1 trail. After a win, reject further moves.
+- **Load-bearing mechanics / traps:**
+  - Extend `RoomSnapshot` with win status, e.g. `status: "playing" | "won"` +
+    `result: { perfect: boolean; meetCell: Cell } | null`. Keep `path` server-side.
+  - In `Game.move`: special-case the rendezvous BEFORE check (c) — if `cell ===
+    other knight's current cell` and not already won: require (a)+(b), then set the
+    mover's knight to that cell (the one allowed shared square), mark won, compute
+    `perfect = union(visited.p1,visited.p2)` covers all `available`-true cells.
+    Decide (diff-gate): whether to append the meet cell to the mover's `visited`.
+  - Moves after `won` → reject. Decide (diff-gate): a new `game_over` ErrorCode vs
+    silently ignoring.
+  - Frontend: win panel on BOTH clients ("Rendezvous!" + a "perfect" badge when all
+    squares covered); lock inputs when `status==="won"`.
+  - Perfect = distinct covered cells (by r,c) across both trails === count of
+    `available`-true cells.
+- **Acceptance criteria:**
+  - Always-run gates green.
+  - Integration: drive both knights to a rendezvous → both clients get
+    `status:"won"`; `perfect` correct for BOTH a full-cover solve (true) and a
+    premature meet (false); the C2 "reject landing on other knight" test is REPLACED
+    by "rendezvous wins"; moves after win rejected; a concurrency case where one of
+    two same-target moves IS the rendezvous resolves to exactly one outcome.
+  - Dual-client smoke: reconstruct the witness, walk both knights along their halves
+    until adjacent, hop onto the other → both contexts show `won` (+ perfect flag)
+    via `window.__KR__`/server.
+- **Decide-with-(diff-gate)-subagent:** the status/result wire shape; whether to
+  append the meet cell to the mover's `visited`; `game_over` error code vs silent ignore.
+- **Locked (don't relitigate):** decisions 1–9, esp. **#1** (same-square win; soft vs
+  perfect; rendezvous hop is the SOLE no-reuse exception). Do NOT implement retry/undo
+  (C4) or view-solution/hint (C5) here.
+- **Resources:** `server/game.ts` (flip check (d) + win/perfect); `shared/engine.ts`
+  `isWin` (reference for coverage logic only — the win MODEL is same-square, NOT
+  full-path); `shared/protocol.ts` (status/result); `tests/integration.test.ts`
+  (invert the dedicated test); `scripts/smoke.mjs` (drive a rendezvous);
+  `frontend/src/{App.tsx,components/Board.tsx}` (win panel + input lock).
+
 ## SLICE-N PICKUP — authored when N-1 commits
 > Author each next handoff only AFTER the previous one commits, folding in a
 > "what slice N-1 taught" block at the top. That is where workflow knowledge
