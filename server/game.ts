@@ -1,14 +1,18 @@
 // Authoritative game state for one room. Fresh for Knight Rendezvous — NOT a
 // port of chess's turn-based Match. It holds the generated puzzle, the two knight
 // positions, and each knight's trail. C2 added independent (non-turn-based)
-// movement; C3 adds rendezvous (same-square win) detection + win status.
+// movement; C3 adds rendezvous (same-square win) detection + win status; C4 added
+// per-player retry/undo; C5 adds room-wide view-solution PLAYBACK (a reversible
+// `playback` status) and a per-player, actor-only witness hint.
 //
 // The server is the only oracle: it generates the puzzle ONCE per room from a
 // random seed and projects a client-facing Board snapshot. The witness `path`
-// stays inside the Puzzle and is NEVER projected onto the wire.
+// stays inside the Puzzle and is NEVER projected onto the wire — view-solution
+// drives animation via server frames (the live knights/visited mutate per frame)
+// and a hint projects only the SINGLE next witness cell, never the whole path.
 
 import { generatePuzzle, knightMoves, type Cell, type Puzzle } from "../shared/engine";
-import { BOARD_N, BOARD_STEPS } from "../shared/config";
+import { BOARD_N, BOARD_STEPS, PLAYBACK_STEP_MS } from "../shared/config";
 import type { Board, ColorToken, PlayerId, PlayerView, RoomSnapshot } from "../shared/protocol";
 
 // The win projection: `status` flips to "won" on the rendezvous hop, and
@@ -31,7 +35,17 @@ export interface MoveError {
   code: "illegal_move" | "game_over";
   message: string;
 }
-export type MoveResult = { ok: true } | { ok: false; error: MoveError };
+// A move/retry/undo attempt resolves to one of THREE outcomes for the Room:
+//   { ok: true }                 → broadcast the new state.
+//   { ok: false, error }         → send the error to the ACTOR only.
+//   { ok: true, silent: true }   → do NOTHING (no broadcast, no error). Used by
+//                                  the playback guard: while a view-solution is
+//                                  animating, a stray move must NOT inject a frame
+//                                  into the playback stream nor surface an error.
+export type MoveResult =
+  | { ok: true; silent?: false }
+  | { ok: true; silent: true }
+  | { ok: false; error: MoveError };
 
 function fail(message: string): MoveResult {
   return { ok: false, error: { code: "illegal_move", message } };
@@ -39,6 +53,50 @@ function fail(message: string): MoveResult {
 
 function gameOver(message: string): MoveResult {
   return { ok: false, error: { code: "game_over", message } };
+}
+
+// The silent no-op result: the op was swallowed (playback in progress) with no
+// state change, no broadcast, and no error to the actor.
+function silentNoop(): MoveResult {
+  return { ok: true, silent: true };
+}
+
+// One playback frame = a full snapshot of the LIVE mutable game fields the wire
+// projects (knights + visited). The Room ticks through the ordered frame list on
+// its timer, applying each onto the live fields and broadcasting. Cloned cells —
+// the same no-leak discipline as every other projection — so a frame can never
+// alias engine-owned state.
+export interface PlaybackFrame {
+  knights: { p1: Cell; p2: Cell };
+  visited: { p1: Cell[]; p2: Cell[] };
+}
+
+// The deep-cloned pre-playback state, saved on viewSolution() and restored
+// verbatim when playback ends — so view-solution returns the game to EXACTLY its
+// prior state and NEVER marks the puzzle solved (locked decision 7).
+interface SavedState {
+  knights: { p1: Cell; p2: Cell };
+  visited: { p1: Cell[]; p2: Cell[] };
+  status: GameStatus;
+  result: GameResult;
+}
+
+// What viewSolution() hands back to the Room. `entered:false` means the request
+// was a no-op (not "playing"): the Room broadcasts nothing and starts no timer.
+// `entered:true` carries the ordered frames for the Room to drive on its timer.
+export type ViewSolutionResult = { entered: false } | { entered: true; frames: PlaybackFrame[] };
+
+// The actor-only hint result (locked decision 7). `null` is the "no hint"
+// sentinel (status not "playing") the Room turns into NOTHING sent. Otherwise it
+// mirrors the `hint` ServerMsg: a single forward/backward witness cell or
+// off_path. The raw `path` is never exposed — only this single next cell.
+export type HintResult =
+  | null
+  | { status: "prefix"; cell: Cell }
+  | { status: "off_path"; cell: null };
+
+function cloneCell(c: Cell): Cell {
+  return { r: c.r, c: c.c };
 }
 
 const otherPid = (pid: PlayerId): PlayerId => (pid === "p1" ? "p2" : "p1");
@@ -67,21 +125,34 @@ export class Game {
   // Each knight's trail (ordered visited squares, including its start). Seeded
   // here so C2's movement/sync has the structure ready; unused in C1 rendering.
   readonly visited: { p1: Cell[]; p2: Cell[] };
-  // Win status. "playing" until the rendezvous hop flips it to "won" (forever —
-  // there is no un-winning in C3). `result` stays null until then, then carries
-  // soft-vs-perfect + the shared meeting cell.
+  // Status. "playing" until the rendezvous hop flips it to "won" (forever — there
+  // is no un-winning), OR until a view-solution flips it to "playback" (C5). Unlike
+  // "won", "playback" is REVERSIBLE: it returns to "playing" when playback ends
+  // (locked decision 7 — view-solution never marks the puzzle solved). `result`
+  // stays null until a win, then carries soft-vs-perfect + the shared meeting cell;
+  // it is never set during playback.
   status: GameStatus = "playing";
   result: GameResult = null;
+
+  // The deep-cloned pre-playback state, populated only while status === "playback"
+  // and consumed (then cleared) by restore(). null whenever not in playback.
+  private saved: SavedState | null = null;
+
+  // Per-frame playback interval the Room drives playback on. A normal watchable
+  // pace by default; tests/smoke inject a small value so they never wait real time.
+  readonly stepMs: number;
 
   constructor(
     readonly players: { p1: GamePlayer; p2: GamePlayer },
     seed: number = randomSeed(),
+    stepMs: number = PLAYBACK_STEP_MS,
   ) {
     this.puzzle = generatePuzzle(BOARD_N, BOARD_STEPS, seed);
     const start: Cell = { r: this.puzzle.start.r, c: this.puzzle.start.c };
     const end: Cell = { r: this.puzzle.end.r, c: this.puzzle.end.c };
     this.knights = { p1: start, p2: end };
     this.visited = { p1: [{ ...start }], p2: [{ ...end }] };
+    this.stepMs = stepMs;
   }
 
   colorOf(pid: PlayerId): ColorToken {
@@ -117,6 +188,14 @@ export class Game {
   move(pid: PlayerId, cell: Cell): MoveResult {
     const n = this.puzzle.n;
     const current = this.knights[pid];
+
+    // (P) PLAYBACK guard — silent no-op. While a view-solution is animating, all
+    // three mutators (move/retry/undo) are locked (locked decision 7). We swallow
+    // the op WITHOUT broadcasting so it cannot inject a stray frame into the
+    // playback stream, and WITHOUT an error (the UI already disables inputs).
+    if (this.status === "playback") {
+      return silentNoop();
+    }
 
     // (0) post-win guard FIRST — unconditional short-circuit. Once the rendezvous
     // has happened the game is over; no further move is accepted from either side.
@@ -190,6 +269,11 @@ export class Game {
    * else to update here.
    */
   retry(pid: PlayerId): MoveResult {
+    // Playback-locked (silent no-op): inputs are locked during view-solution
+    // playback (locked decision 7); swallow without broadcasting an extra frame.
+    if (this.status === "playback") {
+      return silentNoop();
+    }
     // Win-blocked: retry is an in-play affordance only (locked decision 6). Since
     // it can only run while playing, status/result are already "playing"/null —
     // intentionally NOT reset here (no dead status="playing"/result=null writes).
@@ -214,6 +298,11 @@ export class Game {
    * no-reuse recompute as retry — nothing else to update.
    */
   undo(pid: PlayerId): MoveResult {
+    // Playback-locked (silent no-op): same as move/retry — inputs are locked
+    // during view-solution playback (locked decision 7).
+    if (this.status === "playback") {
+      return silentNoop();
+    }
     // Win-blocked, same reasoning as retry: status/result are already
     // "playing"/null when this runs — intentionally NOT reset here.
     if (this.status === "won") {
@@ -227,6 +316,194 @@ export class Game {
     // CLONE the new last cell so knights[pid] is not an alias of the trail entry.
     this.knights[pid] = { r: last.r, c: last.c };
     return { ok: true };
+  }
+
+  // ---- C5: view-solution playback + per-player hint ---------------------
+
+  /** True while a view-solution animation is in progress. */
+  inPlayback(): boolean {
+    return this.status === "playback";
+  }
+
+  /**
+   * Enter view-solution PLAYBACK (locked decision 7). Triggered by ONE player but
+   * room-wide: both knights animate along the witness toward the rendezvous.
+   *
+   * The SINGLE guard `status !== "playing"` blocks BOTH "during won" AND "second
+   * playback" (and "while waiting"): if we are not cleanly playing, this is a
+   * no-op the Room turns into nothing ({ entered: false }).
+   *
+   * Otherwise we DEEP-CLONE and SAVE the live state ({knights, visited, status,
+   * result}), flip status to "playback", and compute canonical frames from
+   * `puzzle.path` (NOT a re-derivation). The frames mutate the LIVE knights/visited
+   * fields as the Room ticks them (so the snapshot + reconnect reflect the current
+   * frame). status is NEVER set to "won" by playback — even the rendezvous frame
+   * only co-locates the two knights; restore() returns to "playing".
+   */
+  viewSolution(): ViewSolutionResult {
+    if (this.status !== "playing") return { entered: false };
+
+    this.saved = {
+      knights: { p1: cloneCell(this.knights.p1), p2: cloneCell(this.knights.p2) },
+      visited: {
+        p1: this.visited.p1.map(cloneCell),
+        p2: this.visited.p2.map(cloneCell),
+      },
+      status: this.status,
+      result:
+        this.result === null ? null : { ...this.result, meetCell: cloneCell(this.result.meetCell) },
+    };
+    this.status = "playback";
+    return { entered: true, frames: this.buildFrames() };
+  }
+
+  /**
+   * Apply one playback frame onto the LIVE fields. The Room calls this per tick so
+   * the snapshot (and any mid-playback reconnect) reflects the current frame —
+   * there is NO separate frame buffer the snapshot can't see. Cells are cloned so
+   * the live arrays never alias the frame list. No-op once playback has ended
+   * (defensive against a late tick after teardown/restore).
+   */
+  applyFrame(frame: PlaybackFrame): void {
+    if (this.status !== "playback") return;
+    // Mutate the existing (readonly-typed) field objects IN PLACE — never reassign
+    // the field — so the C2–C4 in-place discipline (push/pop/truncate) is unbroken.
+    this.knights.p1 = cloneCell(frame.knights.p1);
+    this.knights.p2 = cloneCell(frame.knights.p2);
+    this.visited.p1 = frame.visited.p1.map(cloneCell);
+    this.visited.p2 = frame.visited.p2.map(cloneCell);
+  }
+
+  /**
+   * Restore the saved pre-playback state and return to "playing" (locked decision
+   * 7: view-solution returns the game to EXACTLY its prior state and NEVER marks
+   * it solved). Overwrites the live fields from the deep-clone. IDEMPOTENT and a
+   * NO-OP if not currently in playback (no saved state) — so a late tick or a
+   * double restore (e.g. teardown racing the final tick) cannot corrupt state.
+   */
+  restore(): void {
+    if (this.status !== "playback" || !this.saved) return;
+    const s = this.saved;
+    // Mutate field objects in place (same reason as applyFrame): the fields are
+    // readonly-typed; their contents are overwritten from the deep-clone.
+    this.knights.p1 = cloneCell(s.knights.p1);
+    this.knights.p2 = cloneCell(s.knights.p2);
+    this.visited.p1 = s.visited.p1.map(cloneCell);
+    this.visited.p2 = s.visited.p2.map(cloneCell);
+    this.result =
+      s.result === null ? null : { ...s.result, meetCell: cloneCell(s.result.meetCell) };
+    this.status = s.status; // back to "playing"
+    this.saved = null;
+  }
+
+  /**
+   * Canonical playback frames from the witness `puzzle.path` (NOT a re-derivation,
+   * and deliberately NOT C3's win-path code, which flips status to "won").
+   *
+   * Split at the midpoint k exactly like the tests' convergeMidpoint: P1 walks the
+   * forward prefix path[0..k]; P2 walks the backward suffix path[last..k+1]. The
+   * two halves are disjoint and together cover every cell. The FINAL frame hops P1
+   * path[k] → path[k+1] so BOTH knights end on the SAME cell (path[k+1]) — the
+   * rendezvous geometry — WITHOUT setting status "won".
+   *
+   * Each frame is a full {knights, visited} snapshot with growing trails. Frame 0
+   * is the reset state (both knights at their starts) so playback reads cleanly
+   * from the beginning regardless of where the live trails were when triggered.
+   */
+  private buildFrames(): PlaybackFrame[] {
+    const path = this.puzzle.path;
+    const last = path.length - 1;
+    const k = Math.floor(path.length / 2);
+
+    const frames: PlaybackFrame[] = [];
+    // p1Len / p2Len are how many cells of each half are currently revealed.
+    // p1 reveals path[0..p1Len-1]; p2 reveals path[last..last-(p2Len-1)].
+    const emit = (p1Len: number, p2Len: number): void => {
+      const p1Trail = path.slice(0, p1Len).map(cloneCell);
+      const p2Trail: Cell[] = [];
+      for (let j = 0; j < p2Len; j++) p2Trail.push(cloneCell(path[last - j]));
+      frames.push({
+        knights: {
+          p1: cloneCell(p1Trail[p1Trail.length - 1]),
+          p2: cloneCell(p2Trail[p2Trail.length - 1]),
+        },
+        visited: { p1: p1Trail, p2: p2Trail },
+      });
+    };
+
+    // Frame 0: reset — both knights on their starts.
+    emit(1, 1);
+    // P1 walks forward path[1..k]; P2 holds at its start (path[last]).
+    for (let i = 1; i <= k; i++) emit(i + 1, 1);
+    // P2 walks backward path[last-1..k+1]; P1 holds at path[k].
+    // p2 reveals down to path[k+1], i.e. (last - (k+1)) extra cells beyond its start.
+    const p2FullLen = last - k; // cells path[last..k+1]
+    for (let m = 2; m <= p2FullLen; m++) emit(k + 1, m);
+    // FINAL frame: P1 hops path[k] → path[k+1] (onto P2) — both on path[k+1].
+    // P1's trail becomes path[0..k] plus path[k+1] (the shared rendezvous cell).
+    {
+      const p1Trail = path.slice(0, k + 1).map(cloneCell);
+      p1Trail.push(cloneCell(path[k + 1]));
+      const p2Trail: Cell[] = [];
+      for (let j = 0; j < p2FullLen; j++) p2Trail.push(cloneCell(path[last - j]));
+      frames.push({
+        knights: {
+          p1: cloneCell(path[k + 1]),
+          p2: cloneCell(path[k + 1]),
+        },
+        visited: { p1: p1Trail, p2: p2Trail },
+      });
+    }
+    return frames;
+  }
+
+  /**
+   * A per-player, witness-only hint (locked decision 7) — NEW logic, not a literal
+   * analysis.ts port. Points the REQUESTER's OWN knight to its next witness cell.
+   * Only allowed while "playing": any other status returns the `null` no-hint
+   * sentinel (the Room sends nothing).
+   *
+   * The witness is split at the SAME midpoint k as playback so a hint never points
+   * onto the other knight's reserved half / past the meeting middle:
+   *   - P1 (forward): on-prefix iff visited.p1 equals path[0..len-1]; the next cell
+   *     is path[len] — but capped at path[k] (P1's last own cell before the
+   *     rendezvous hop). If already at/over path[k], there is no forward hint.
+   *   - P2 (backward): on-suffix iff visited.p2 equals path[last..last-len+1]
+   *     (reversed); the next cell is path[last-len] — capped at path[k+1] (P2's
+   *     last own cell). If already at/over path[k+1], there is no forward hint.
+   * Off the prefix/suffix → off_path. Never projects the raw `path`.
+   */
+  hint(pid: PlayerId): HintResult {
+    if (this.status !== "playing") return null; // hint only while playing
+    const path = this.puzzle.path;
+    const last = path.length - 1;
+    const k = Math.floor(path.length / 2);
+    const trail = this.visited[pid];
+    const len = trail.length;
+
+    if (pid === "p1") {
+      // On the forward prefix? trail must equal path[0..len-1].
+      const onPrefix = trail.every((c, i) => sameCell(c, path[i]));
+      // P1's own half is path[0..k]; the next forward cell is path[len], valid only
+      // while len <= k (so the hint never points onto P2's reserved suffix or the
+      // meeting middle). path[k] is P1's final own cell before the rendezvous hop.
+      if (onPrefix && len <= k) {
+        return { status: "prefix", cell: cloneCell(path[len]) };
+      }
+      return { status: "off_path", cell: null };
+    }
+
+    // P2 walks backward from path[last]; its trail (in order) is
+    // path[last], path[last-1], …, path[last-(len-1)]. On-suffix iff each entry
+    // matches that reversed sequence.
+    const onSuffix = trail.every((c, i) => sameCell(c, path[last - i]));
+    // P2's own half is path[last..k+1]; the next backward cell is path[last-len],
+    // valid only while last-len >= k+1 (so it never points onto P1's prefix or the
+    // meeting middle). path[k+1] is P2's final own cell.
+    if (onSuffix && last - len >= k + 1) {
+      return { status: "prefix", cell: cloneCell(path[last - len]) };
+    }
+    return { status: "off_path", cell: null };
   }
 
   /**

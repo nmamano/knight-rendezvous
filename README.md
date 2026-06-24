@@ -14,6 +14,7 @@ square**. Move freely, no turns.
 Built via a gated slice loop — see [`plans/knight-rendezvous-loop.md`](plans/knight-rendezvous-loop.md).
 
 ## Status
-C4 done — each player has Retry (reset only your knight to its start) and Undo
-(take back only your last move); neither touches the other knight, and both are
-blocked once the game is won. Next: C5 (view solution to both + per-player hint).
+C5 done — "View solution" plays the full meet-in-the-middle animation on both
+screens then returns the game exactly where it was (never marks it solved), and
+"Hint" privately nudges only the asking player's knight along the solution.
+Next: C6 (polish, mobile, "new puzzle", cross-link to Knight's Puzzle).

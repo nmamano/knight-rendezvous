@@ -2,11 +2,13 @@
 // socket's binding to a room slot. All game state + broadcasting lives in Room.
 //
 // Adapted from round-trip-chess/server/socket.ts. Message set: create / join /
-// reconnect / leave / move (NOT turn-based — a move is always for the sender's
-// own knight, inferred from the bound slot). Boundary validation here is the
-// first line of defense: it rejects structurally malformed payloads (e.g. a
-// non-string room code or a non-{r,c} move cell) before they reach the store;
-// game-rule legality is decided in Game.move, not here.
+// reconnect / leave / move / retry / undo / viewSolution / hint (NOT turn-based —
+// every player action is for the sender's own slot, inferred from the binding).
+// viewSolution and hint mirror retry/undo: active() guard, player from the bound
+// slot, no payload validation. Boundary validation here is the first line of
+// defense: it rejects structurally malformed payloads (e.g. a non-string room
+// code or a non-{r,c} move cell) before they reach the store; game-rule legality
+// is decided in Game, not here.
 
 import { createBunWebSocket } from "hono/bun";
 import type { Hono } from "hono";
@@ -176,6 +178,22 @@ export function registerSocket(app: Hono, store: RoomStore) {
             const b = active();
             if (!b) return;
             b.room.undo(b.pid, conn);
+            return;
+          }
+          case "viewSolution": {
+            // No payload validation: viewSolution carries no fields beyond `t`.
+            // It is room-wide; the Room ignores it unless the game is "playing".
+            const b = active();
+            if (!b) return;
+            b.room.viewSolution(b.pid, conn);
+            return;
+          }
+          case "hint": {
+            // No payload validation: hint carries no fields beyond `t`. The player
+            // is inferred from the bound slot; the response is ACTOR-ONLY.
+            const b = active();
+            if (!b) return;
+            b.room.hint(b.pid, conn);
             return;
           }
           case "leave": {

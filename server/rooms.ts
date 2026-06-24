@@ -6,9 +6,16 @@
 // authoritative state is a co-op Game (not a turn-based Match), and the puzzle is
 // generated when the SECOND player joins (the room becomes active).
 //
-// Timer invariant: there is EXACTLY ONE timer category — per-slot reconnect
-// grace. Every disconnect/leave/reconnect path either clears the grace timer or
-// no-ops safely when the slot's socket was replaced.
+// Timer invariant: there are now TWO room-scoped timer categories.
+//   1. Per-slot reconnect grace (one per slot). Every disconnect/leave/reconnect
+//      path either clears the grace timer or no-ops safely when the slot's socket
+//      was replaced.
+//   2. A SINGLE view-solution playback timer (`playbackTimer`, at most one per
+//      room, C5). It is cleared in exactly two places: when playback runs out of
+//      frames (the final restore tick clears it), and in teardown() (so a room
+//      reaped mid-playback cancels it). Its tick/restore callbacks also no-op if
+//      the room is no longer alive or the game has left playback, so a late tick
+//      after teardown/restore can never broadcast or crash.
 
 import { customAlphabet } from "nanoid";
 import { Game, colorOf, type GamePlayer } from "./game";
@@ -59,10 +66,16 @@ export class Room {
   // Flipped false by teardown so a late socket close on a remaining player can't
   // arm a grace timer on an already-reaped room.
   private alive = true;
+  // The SINGLE view-solution playback timer (C5). At most one per room; null when
+  // no playback is running. Cleared on the last frame and in teardown().
+  private playbackTimer: Timer | null = null;
 
   constructor(
     readonly code: string,
     private readonly onEmpty: (code: string) => void,
+    // Per-frame playback interval for this room's Game. Defaults to the Game's own
+    // default (a normal pace); tests/smoke inject a small value via RoomStore.
+    private readonly stepMs?: number,
   ) {}
 
   hasOpenSlot(): boolean {
@@ -100,8 +113,13 @@ export class Room {
 
     // Pass the slot player objects by reference so presence changes propagate
     // into the game's snapshot without any extra wiring. The Game generates the
-    // puzzle once here, with a random server seed.
-    this.game = new Game({ p1: this.slots.p1.player, p2: this.slots.p2.player });
+    // puzzle once here, with a random server seed. `stepMs` (when injected by a
+    // test/smoke via RoomStore) sets the view-solution playback cadence.
+    this.game = new Game(
+      { p1: this.slots.p1.player, p2: this.slots.p2.player },
+      undefined,
+      this.stepMs,
+    );
     return { pid: "p2", token };
   }
 
@@ -139,6 +157,7 @@ export class Room {
       conn.send({ t: "error", code: res.error.code, message: res.error.message });
       return;
     }
+    if (res.silent) return; // playback-locked: swallow without broadcasting
     this.broadcast();
   }
 
@@ -159,6 +178,7 @@ export class Room {
       conn.send({ t: "error", code: res.error.code, message: res.error.message });
       return;
     }
+    if (res.silent) return; // playback-locked: swallow without broadcasting
     this.broadcast();
   }
 
@@ -177,7 +197,78 @@ export class Room {
       conn.send({ t: "error", code: res.error.code, message: res.error.message });
       return;
     }
+    if (res.silent) return; // playback-locked: swallow without broadcasting
     this.broadcast();
+  }
+
+  /**
+   * Trigger room-wide view-solution playback (locked decision 7). Stale-socket
+   * guarded like every other action. If the Game entered playback, drive its
+   * ordered frames on a single `setInterval`: each tick applies the next frame and
+   * broadcast()s; when frames are exhausted the Game RESTORES its pre-playback
+   * state and a final broadcast() returns both clients to the playable position.
+   * A no-op viewSolution (not "playing": won / already in playback / waiting)
+   * broadcasts nothing and starts no timer.
+   *
+   * Both the tick and the final restore no-op if the room is no longer alive or
+   * the game has left playback (B1 lifecycle): a late tick after teardown/restore
+   * can neither broadcast nor crash.
+   */
+  viewSolution(pid: PlayerId, conn: Connection): void {
+    const slot = this.slots[pid];
+    if (!slot || slot.conn !== conn) return; // a replaced/stale socket may not act
+    if (!this.game) return;
+    if (this.playbackTimer) return; // a playback is already running (defensive)
+
+    const res = this.game.viewSolution();
+    if (!res.entered) return; // not "playing" → no-op, nothing sent, no timer
+    const frames = res.frames;
+    let i = 0;
+    const stepMs = this.game.stepMs;
+
+    const tick = () => {
+      // Bail (and stop ticking) if the room was reaped or playback was ended out
+      // from under us — never broadcast onto a dead/restored room.
+      if (!this.alive || !this.game || !this.game.inPlayback()) {
+        this.clearPlaybackTimer();
+        return;
+      }
+      if (i < frames.length) {
+        this.game.applyFrame(frames[i]);
+        i++;
+        this.broadcast();
+        return;
+      }
+      // Frames exhausted: restore the pre-playback state and broadcast the return
+      // to "playing", then stop the timer.
+      this.clearPlaybackTimer();
+      this.game.restore();
+      this.broadcast();
+    };
+
+    this.playbackTimer = setInterval(tick, stepMs);
+  }
+
+  private clearPlaybackTimer(): void {
+    if (this.playbackTimer) {
+      clearInterval(this.playbackTimer);
+      this.playbackTimer = null;
+    }
+  }
+
+  /**
+   * Per-player witness hint (locked decision 7): compute the requester's next
+   * witness cell and send the ACTOR-ONLY `hint` ServerMsg to `conn` ONLY — NEVER
+   * broadcast, so the other client learns nothing. The Game returns `null` (the
+   * no-hint sentinel, when not "playing") → we send NOTHING.
+   */
+  hint(pid: PlayerId, conn: Connection): void {
+    const slot = this.slots[pid];
+    if (!slot || slot.conn !== conn) return; // a replaced/stale socket may not act
+    if (!this.game) return;
+    const res = this.game.hint(pid);
+    if (!res) return; // no-hint sentinel → send nothing
+    conn.send({ t: "hint", ...res });
   }
 
   // ---- presence / teardown ---------------------------------------------
@@ -210,6 +301,9 @@ export class Room {
 
   private teardown(leftPid: PlayerId): void {
     this.alive = false;
+    // Cancel BOTH room-scoped timer categories: every slot's reconnect grace AND
+    // the single view-solution playback timer (B1 lifecycle). With `alive` now
+    // false, any already-queued playback tick also self-cancels (see viewSolution).
     for (const pid of ["p1", "p2"] as const) {
       const s = this.slots[pid];
       if (s?.graceTimer) {
@@ -217,6 +311,7 @@ export class Room {
         s.graceTimer = null;
       }
     }
+    this.clearPlaybackTimer();
     const opp = this.slots[other(leftPid)];
     opp?.conn?.send({ t: "opponentLeft" });
     this.onEmpty(this.code);
@@ -275,12 +370,26 @@ export class Room {
 export class RoomStore {
   private rooms = new Map<string, Room>();
 
+  // Optional view-solution playback cadence applied to every room this store
+  // creates. When omitted, each room reads `KR_PLAYBACK_STEP_MS` from the env at
+  // creation time (so smoke can inject a small value) and otherwise falls back to
+  // the Game's default. Tests pass it directly for a deterministic small interval.
+  constructor(private readonly stepMs?: number) {}
+
   createRoom(): Room {
     let code = genCode();
     while (this.rooms.has(code)) code = genCode();
-    const room = new Room(code, (c) => this.rooms.delete(c));
+    const room = new Room(code, (c) => this.rooms.delete(c), this.resolveStepMs());
     this.rooms.set(code, room);
     return room;
+  }
+
+  private resolveStepMs(): number | undefined {
+    if (this.stepMs !== undefined) return this.stepMs;
+    const env = process.env.KR_PLAYBACK_STEP_MS;
+    if (env === undefined) return undefined;
+    const n = Number(env);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
   }
 
   get(code: string): Room | undefined {

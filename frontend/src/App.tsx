@@ -107,6 +107,13 @@ export function App() {
   // when the message text is identical to the previous one (chess pattern).
   const [actionNonce, setActionNonce] = useState(0);
   const [opponentLeft, setOpponentLeft] = useState(false);
+  // C5 hint UI (actor-only): the highlighted next-witness cell to pulse, or a
+  // transient "no hint from here" flag for an off_path response. Both clear on a
+  // timer and on any new server `state`. `hintNonce` re-fires the pulse even when
+  // the same cell is hinted twice in a row.
+  const [hintCell, setHintCell] = useState<Cell | null>(null);
+  const [hintOffPath, setHintOffPath] = useState(false);
+  const [hintNonce, setHintNonce] = useState(0);
 
   const netRef = useRef<Net | null>(null);
   const urlRoom = roomFromUrl();
@@ -122,7 +129,22 @@ export function App() {
         break;
       case "state":
         setError(null);
+        // A fresh server frame supersedes any pending hint highlight.
+        setHintCell(null);
+        setHintOffPath(false);
         setSnapshot(m.state);
+        break;
+      case "hint":
+        // Actor-only response: only the requester ever receives this. Pulse the
+        // returned cell, or flash a brief "no hint from here" for off_path.
+        if (m.status === "prefix") {
+          setHintCell(m.cell);
+          setHintOffPath(false);
+        } else {
+          setHintCell(null);
+          setHintOffPath(true);
+        }
+        setHintNonce((n) => n + 1);
         break;
       case "opponentLeft":
         setOpponentLeft(true);
@@ -185,6 +207,17 @@ export function App() {
     return () => clearTimeout(id);
   }, [error, actionNonce]);
 
+  // Transient hint highlight: a prefix-cell pulse or an off_path flash auto-clears
+  // after a short window. Keyed on hintNonce so a repeat hint re-fires the timer.
+  useEffect(() => {
+    if (!hintCell && !hintOffPath) return;
+    const id = setTimeout(() => {
+      setHintCell(null);
+      setHintOffPath(false);
+    }, 2200);
+    return () => clearTimeout(id);
+  }, [hintCell, hintOffPath, hintNonce]);
+
   // User-initiated create/join: clear any stored session FIRST so a stale
   // reconnect isn't replayed ahead of this and silently swallow it (the server
   // ignores create/join while already bound).
@@ -223,6 +256,19 @@ export function App() {
     netRef.current?.send({ t: "undo" });
   }, []);
 
+  // C5 — view solution (room-wide) + hint (per-player). No optimistic UI: the
+  // server drives playback frames on `state`, and the hint highlight comes from
+  // the actor-only `hint` ServerMsg. Both buttons are disabled while locked.
+  const viewSolution = useCallback(() => {
+    setError(null);
+    netRef.current?.send({ t: "viewSolution" });
+  }, []);
+
+  const hint = useCallback(() => {
+    setError(null);
+    netRef.current?.send({ t: "hint" });
+  }, []);
+
   const exit = useCallback(() => {
     netRef.current?.send({ t: "leave" });
     clearSession();
@@ -252,12 +298,18 @@ export function App() {
     const me = snapshot.players.find((p) => p.id === you);
     const opp = snapshot.players.find((p) => p.id !== you);
     const won = snapshot.status === "won";
+    const playback = snapshot.status === "playback";
+    // ONE authoritative input lock: anything other than "playing" disables ALL
+    // inputs (board clicks, retry, undo, hint, view-solution). This single
+    // predicate is the source every control consults (locked decision 7: inputs
+    // locked during playback; the win panel already covers "won").
+    const locked = snapshot.status !== "playing";
     // Your own trail length drives the button-disable UX (server is the authority).
     // length<=1 means you are at your start: nothing to undo, nothing to retry.
     const myTrailLen = you ? snapshot.visited[you].length : 0;
     const atStart = myTrailLen <= 1;
-    const undoDisabled = won || atStart;
-    const retryDisabled = won || atStart;
+    const undoDisabled = locked || atStart;
+    const retryDisabled = locked || atStart;
     view = (
       <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col items-center justify-center gap-6 px-4 py-10 text-center">
         <h1 className="text-3xl font-extrabold tracking-tight" style={{ color: "#3a3357" }}>
@@ -271,9 +323,14 @@ export function App() {
           board={snapshot.board}
           knights={snapshot.knights}
           visited={snapshot.visited}
-          // Lock the board on a win — do NOT rely on the server error as the only
-          // guard. A no-op onMove means clicks are ignored client-side too.
-          onMove={won ? () => {} : move}
+          // Lock the board whenever not "playing" (win OR playback) — do NOT rely
+          // on the server error as the only guard. A no-op onMove ignores clicks
+          // client-side too.
+          onMove={locked ? () => {} : move}
+          // The actor-only hint cell to pulse (null when none). Keyed by nonce so a
+          // repeat hint re-triggers the animation.
+          hintCell={hintCell}
+          hintNonce={hintNonce}
         />
         {/* Per-player controls (locked decision 6). Retry resets ONLY your knight
             to its start; Undo pops ONLY your last move. Disabled when the game is
@@ -299,15 +356,51 @@ export function App() {
           >
             Undo
           </button>
+          <button
+            type="button"
+            onClick={hint}
+            disabled={locked}
+            className="rounded-full border-2 border-[#c9bdf4] bg-white px-5 py-2 text-lg font-bold text-[#4a4366] shadow-[0_4px_0_0_#d6d8e6] transition hover:bg-[#f3effd] active:translate-y-0.5 active:shadow-[0_2px_0_0_#d6d8e6] disabled:cursor-not-allowed disabled:opacity-50 disabled:active:translate-y-0 disabled:active:shadow-[0_4px_0_0_#d6d8e6]"
+            style={{ fontFamily: "var(--display)" }}
+          >
+            Hint
+          </button>
+          <button
+            type="button"
+            onClick={viewSolution}
+            disabled={locked}
+            className="rounded-full border-2 border-[#c9bdf4] bg-white px-5 py-2 text-lg font-bold text-[#4a4366] shadow-[0_4px_0_0_#d6d8e6] transition hover:bg-[#f3effd] active:translate-y-0.5 active:shadow-[0_2px_0_0_#d6d8e6] disabled:cursor-not-allowed disabled:opacity-50 disabled:active:translate-y-0 disabled:active:shadow-[0_4px_0_0_#d6d8e6]"
+            style={{ fontFamily: "var(--display)" }}
+          >
+            View solution
+          </button>
         </div>
+        {playback && (
+          <p
+            role="status"
+            data-playback="1"
+            className="rounded-2xl border-2 border-[var(--accent)] bg-white px-4 py-2 text-sm font-bold text-[var(--accent)] shadow-[0_4px_0_0_#d6d8e6]"
+          >
+            Playing solution…
+          </p>
+        )}
+        {hintOffPath && (
+          <p
+            role="status"
+            data-hint="off_path"
+            className="rounded-2xl bg-[#9a7a2a]/10 px-4 py-2 text-sm font-semibold text-[#8a6a1a]"
+          >
+            No hint from here — you've wandered off the witness path.
+          </p>
+        )}
         {won && snapshot.result ? (
           <WinPanel perfect={snapshot.result.perfect} />
-        ) : (
+        ) : !playback ? (
           <p className="text-sm text-[#6b6580]">
             Hop your knight onto the other knight to rendezvous. Cover every square for a perfect
             win!
           </p>
-        )}
+        ) : null}
         {opponentLeft && (
           <p className="rounded-2xl bg-[#9a4a4a]/10 px-4 py-2 text-sm font-semibold text-[#9a4a4a]">
             Your opponent left the room.

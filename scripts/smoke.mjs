@@ -1,4 +1,13 @@
-// Dual-client real-browser smoke gate for Knight Rendezvous (C3 + C4).
+// Dual-client real-browser smoke gate for Knight Rendezvous (C3 + C4 + C5).
+//
+// C5: with a small KR_PLAYBACK_STEP_MS injected into the server, context A clicks
+// "View solution" and BOTH contexts observe status "playback" then a return to
+// "playing" with the pre-playback state restored EXACTLY (never marked solved) —
+// judged via the server-authoritative window.__KR__. Then context A clicks "Hint"
+// and ONLY context A highlights a cell (data-hint="1"); context B's __KR__ is
+// byte-unchanged and shows no hint UI (the hint is actor-only). The "path"-leak
+// guard is extended to cover playback frames and the hint. All waits use
+// waitForFunction — never a fixed timeout.
 //
 // Boots ONE Bun server (server/index.ts) on reserved port 4318 serving the built
 // frontend/dist, then drives TWO headless system-Chrome contexts: context A
@@ -38,7 +47,15 @@ const URL = `http://localhost:${PORT}`;
 function startServer() {
   const child = spawn("bun", ["run", "server/index.ts"], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, PORT: String(PORT), NODE_ENV: "production" },
+    // KR_PLAYBACK_STEP_MS: a small view-solution cadence so the C5 playback
+    // assertions never wait real seconds (still uses waitForFunction, never a
+    // fixed timeout). RoomStore reads it per createRoom.
+    env: {
+      ...process.env,
+      PORT: String(PORT),
+      NODE_ENV: "production",
+      KR_PLAYBACK_STEP_MS: "20",
+    },
   });
   let stderr = "";
   child.stderr.on("data", (d) => (stderr += d.toString()));
@@ -356,6 +373,111 @@ try {
   // p1 is back on its start and p2 never moved → the perfect-win choreography
   // below proceeds exactly as in C3.
 
+  // ---- C5: VIEW SOLUTION (room-wide) — both contexts animate then RESTORE -----
+  // p1 hops once so the pre-playback state is non-trivial (the restore must bring
+  // it back EXACTLY). Drive the real "View solution" button on context A; assert
+  // via the server-authoritative window.__KR__ on BOTH contexts that status goes
+  // "playback" then back to "playing" with the pre-playback state restored.
+  await hopAndConverge(pageA, "p1", path[1]); // p1 trail: [start, path[1]]
+  await awaitP1(2, path[1]);
+  const preVS = JSON.stringify(
+    await pageA.evaluate(() => ({
+      knights: window.__KR__.knights,
+      visited: window.__KR__.visited,
+      status: window.__KR__.status,
+      result: window.__KR__.result,
+    })),
+  );
+
+  await pageA.getByRole("button", { name: "View solution" }).click();
+
+  // BOTH contexts must observe the playback status (server-driven frames).
+  for (const page of [pageA, pageB]) {
+    await page.waitForFunction(() => window.__KR__ && window.__KR__.status === "playback", {
+      timeout: 15000,
+    });
+  }
+  // BOTH contexts must then return to "playing" with the pre-playback state
+  // restored EXACTLY (view-solution never marks the puzzle solved).
+  for (const [page, label] of [
+    [pageA, "A"],
+    [pageB, "B"],
+  ]) {
+    await page.waitForFunction(
+      (pre) => {
+        const s = window.__KR__;
+        if (!s || s.status !== "playing" || !s.visited || !s.knights) return false;
+        const now = JSON.stringify({
+          knights: s.knights,
+          visited: s.visited,
+          status: s.status,
+          result: s.result,
+        });
+        return now === pre;
+      },
+      preVS,
+      { timeout: 15000 },
+    );
+    const after = JSON.stringify(
+      await page.evaluate(() => ({
+        knights: window.__KR__.knights,
+        visited: window.__KR__.visited,
+        status: window.__KR__.status,
+        result: window.__KR__.result,
+      })),
+    );
+    if (after !== preVS) {
+      throw new Error(`[${label}] view-solution did not restore the pre-playback state`);
+    }
+  }
+
+  // Undo p1's extra hop so the perfect-win choreography below starts from start.
+  await pageA.getByRole("button", { name: "Undo" }).click();
+  await awaitP1(1, boardA.start);
+
+  // ---- C5: HINT (per-player, ACTOR-ONLY) — only the requester highlights -------
+  // Snapshot context B's server state up front; after A requests a hint, B's
+  // __KR__ must be byte-identical AND B must show NO hint cell (the response is
+  // sent to A alone, never broadcast).
+  const bBeforeHint = JSON.stringify(await pageB.evaluate(() => window.__KR__));
+  await pageA.getByRole("button", { name: "Hint", exact: true }).click();
+  // Context A highlights exactly one hinted cell (data-hint="1").
+  await pageA.waitForFunction(() => document.querySelectorAll('[data-hint="1"]').length === 1, {
+    timeout: 10000,
+  });
+  // Context B never highlights a hint cell, and its server state is unchanged.
+  const bHintCells = await pageB.locator('[data-hint="1"]').count();
+  if (bHintCells !== 0) {
+    throw new Error(`hint leaked to the other context: B shows ${bHintCells} hint cells`);
+  }
+  const bAfterHint = JSON.stringify(await pageB.evaluate(() => window.__KR__));
+  if (bAfterHint !== bBeforeHint) {
+    throw new Error("hint changed the OTHER context's server state (must be actor-only)");
+  }
+  // The hinted cell on A must be a real, available cell on the board.
+  const hintCellA = await pageA.evaluate(() => {
+    const el = document.querySelector('[data-hint="1"]');
+    return el ? el.getAttribute("data-cell") : null;
+  });
+  if (!hintCellA) throw new Error("context A did not surface a hinted cell");
+  // Let the transient hint pulse clear before the win choreography (no fixed wait
+  // for game state — just remove the highlight so it can't confuse later reads).
+  await pageA.waitForFunction(() => document.querySelectorAll('[data-hint="1"]').length === 0, {
+    timeout: 10000,
+  });
+
+  // The witness path must NEVER reach a client — neither through a playback frame
+  // (now in __KR__ history) nor the hint. Guard the CURRENT __KR__ on both.
+  for (const [page, label] of [
+    [pageA, "A"],
+    [pageB, "B"],
+  ]) {
+    const krJson = await page.evaluate(() => JSON.stringify(window.__KR__));
+    if (krJson.includes('"path"')) {
+      throw new Error(`[${label}] window.__KR__ leaked the witness path after C5`);
+    }
+  }
+
   // p1 walks forward path[1]..path[meetK-1].
   for (let j = 1; j <= meetK - 1; j++) {
     await hopAndConverge(pageA, "p1", path[j]);
@@ -476,6 +598,8 @@ try {
         c4UndoVerified: true,
         c4RetryVerified: true,
         c4OtherPlayerUntouched: true,
+        c5ViewSolutionRestored: true,
+        c5HintActorOnly: true,
         chrome: browser.version(),
       },
       null,

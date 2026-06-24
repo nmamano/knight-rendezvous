@@ -28,6 +28,10 @@ interface Props {
   knights: { p1: Cell; p2: Cell };
   visited: { p1: Cell[]; p2: Cell[] };
   onMove: (cell: Cell) => void;
+  // C5 actor-only hint: the witness cell to pulse for the LOCAL player (null when
+  // none). `hintNonce` re-keys the element so a repeat hint restarts the pulse.
+  hintCell?: Cell | null;
+  hintNonce?: number;
 }
 
 // SVG polyline points for a trail in board coordinates (cell centers).
@@ -35,7 +39,7 @@ function polyPoints(trail: Cell[]): string {
   return trail.map((v) => `${v.c + 0.5},${v.r + 0.5}`).join(" ");
 }
 
-export function Board({ board, knights, visited, onMove }: Props) {
+export function Board({ board, knights, visited, onMove, hintCell, hintNonce }: Props) {
   const { n, available, start, end } = board;
   // Board frame is 5px each side; the playable field is n cells + (n-1) gaps.
   const maxBoardPx = n * DESK_CELL + (n - 1) * GAP + 2 * PAD + 10;
@@ -66,18 +70,22 @@ export function Board({ board, knights, visited, onMove }: Props) {
             const isStart = sameCell(start, cell);
             const isEnd = sameCell(end, cell);
             const owner = trailOwner.get(cellKey(r, c));
+            const isHint = hintCell != null && sameCell(hintCell, cell);
             const className = [
               "cell",
               dark ? "dark" : "light",
               avail ? "open" : "blocked",
               owner === "p1" ? "trail-amber" : owner === "p2" ? "trail-violet" : "",
+              isHint ? "hint-pulse" : "",
             ]
               .filter(Boolean)
               .join(" ");
             return (
               <div
-                key={k}
+                // Re-key the hinted cell on each hint so the pulse animation restarts.
+                key={isHint ? `${k}-hint-${hintNonce ?? 0}` : k}
                 data-cell={k}
+                data-hint={isHint ? "1" : undefined}
                 className={className}
                 role={avail ? "button" : undefined}
                 tabIndex={avail ? 0 : undefined}

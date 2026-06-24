@@ -31,3 +31,14 @@ export const MAX_NAME_LENGTH = 20;
 
 export const BOARD_N = 6;
 export const BOARD_STEPS = 18;
+
+// ---------------------------------------------------------------------------
+// View-solution playback cadence (C5, locked decision 7).
+//
+// The default per-frame interval the Room uses to drive view-solution playback.
+// A normal, watchable pace. Tests and the smoke gate inject a SMALL value (via
+// the Game/Room stepMs seam) so they assert on the frame SEQUENCE without
+// waiting real seconds. Mirrors knights-puzzle's STEP_MS playback cadence.
+// ---------------------------------------------------------------------------
+
+export const PLAYBACK_STEP_MS = 280;

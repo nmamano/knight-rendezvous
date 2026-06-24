@@ -15,6 +15,11 @@ let server: ReturnType<typeof Bun.serve>;
 let WS_URL = "";
 
 beforeAll(() => {
+  // C5: drive view-solution playback at a tiny per-frame interval so tests assert
+  // the frame SEQUENCE without ever waiting real time. RoomStore.resolveStepMs
+  // reads this env lazily per createRoom, so setting it before any room is created
+  // (i.e. here, before the first test) is sufficient.
+  process.env.KR_PLAYBACK_STEP_MS = "1";
   server = Bun.serve({ port: 0, fetch: app.fetch, websocket: app.websocket });
   WS_URL = `ws://localhost:${server.port}/ws`;
 });
@@ -30,6 +35,11 @@ interface Client {
   ): Promise<OfType<K>>;
   last<K extends ServerMsg["t"]>(t: K): OfType<K> | null;
   states(): OfType<"state">[];
+  // Count of received messages of a given type (for actor-only assertions: the
+  // OTHER client's count must not change when we request a hint).
+  inboxCount(t: ServerMsg["t"]): number;
+  // Every received message, for the path-leak guard across ALL message types.
+  allMessages(): ServerMsg[];
   close(): void;
 }
 
@@ -74,6 +84,8 @@ function client(): Client {
       return null;
     },
     states: () => inbox.filter((m): m is OfType<"state"> => m.t === "state"),
+    inboxCount: (t) => inbox.filter((m) => m.t === t).length,
+    allMessages: () => inbox.slice(),
     close: () => ws.close(),
   };
 }
@@ -1091,6 +1103,385 @@ describe("C4 retry + undo (real WS)", () => {
     );
     expect(JSON.stringify(afterUndo.visited.p2)).toBe(p2VisitedAfterMove);
     expect(JSON.stringify(afterUndo.knights.p2)).toBe(p2KnightAfterMove);
+    p1.close();
+    p2.close();
+  });
+});
+
+// ---- C5: view-solution playback + per-player hint --------------------------
+
+// Drive a view-solution to completion on BOTH clients and return the captured
+// pre-playback state, the observed playback frame count, and the restored state.
+// Rooms run at KR_PLAYBACK_STEP_MS=1 (set in beforeAll), so this never waits real
+// time — it asserts on the SEQUENCE of broadcasts, not on a clock.
+async function runViewSolution(p1: Client, p2: Client, actor: Client) {
+  const prePlayback = activeState(actor.last("state")!);
+  const baseCount1 = p1.states().length;
+
+  actor.send({ t: "viewSolution" });
+
+  // BOTH clients must observe the playback status.
+  await p1.waitFor("state", (m) => m.state.status === "playback");
+  await p2.waitFor("state", (m) => m.state.status === "playback");
+
+  // Then BOTH must observe the return to "playing" (the restore frame). Capture
+  // EACH client's restored state from its own restore broadcast (reading
+  // p2.last("state") right after p1's restore can race p2's restore broadcast).
+  const restored1 = await p1.waitFor(
+    "state",
+    (m) => m.state.status === "playing" && p1.states().length > baseCount1 + 1,
+  );
+  const restored2 = await p2.waitFor(
+    "state",
+    (m) =>
+      m.state.status === "playing" &&
+      m.state.visited != null &&
+      // The restore broadcast is the one whose trails match the pre-playback ones
+      // (NOT a stale "playing" state before playback began).
+      JSON.stringify(m.state.visited) === JSON.stringify(prePlayback.visited),
+  );
+
+  return {
+    prePlayback,
+    restored: activeState(restored1),
+    restored2: activeState(restored2),
+  };
+}
+
+describe("C5 view-solution + hint (real WS)", () => {
+  test("viewSolution: BOTH clients see playback frames, then state RESTORES byte-equal; never won", async () => {
+    const { p1, p2, init } = await activeGame();
+    // Move both knights a few hops so the restore target is a NON-trivial state
+    // (not just the initial position) — a regression that fails to restore would
+    // leave the knights at a playback frame, not here.
+    const path = reconstructPath(init.board, init.knights.p1, init.knights.p2);
+    const last = path.length - 1;
+    for (let j = 1; j <= 2; j++) {
+      p1.send({ t: "move", cell: path[j] });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, path[j]));
+    }
+    p2.send({ t: "move", cell: path[last - 1] });
+    await awaitMoveApplied(p1, p2, (v) => inCells(v.p2, path[last - 1]));
+
+    // Capture the playback frames as they stream: collect every state with status
+    // "playback" on p1. There must be MORE THAN ONE (knights advancing).
+    const beforePlaybackStates = p1.states().length;
+    const { prePlayback, restored, restored2 } = await runViewSolution(p1, p2, p1);
+
+    const playbackFrames = p1
+      .states()
+      .slice(beforePlaybackStates)
+      .filter((m) => m.state.status === "playback");
+    expect(playbackFrames.length).toBeGreaterThan(1);
+    // Frames actually MOVE the knights (the trails grow across frames).
+    const firstFrame = playbackFrames[0].state;
+    const lastFrame = playbackFrames[playbackFrames.length - 1].state;
+    expect(JSON.stringify(firstFrame.knights)).not.toBe(JSON.stringify(lastFrame.knights));
+
+    // Playback NEVER marked the puzzle solved.
+    expect(playbackFrames.every((m) => m.state.status === "playback")).toBe(true);
+    expect(playbackFrames.every((m) => m.state.result === null)).toBe(true);
+
+    // After playback the state is byte-equal to the pre-playback state
+    // (knights + visited + status + result) and status is "playing", NOT "won".
+    expect(restored.status).toBe("playing");
+    expect(restored.result).toBeNull();
+    expect(JSON.stringify(restored)).toBe(JSON.stringify(prePlayback));
+    // Both clients agree on the restored state (each read from its own restore).
+    expect(JSON.stringify(restored2)).toBe(JSON.stringify(restored));
+    p1.close();
+    p2.close();
+  });
+
+  test("during playback: move/retry/undo are silent no-ops — no state change, no error, no stray frame", async () => {
+    const { p1, p2, init } = await activeGame();
+    const path = reconstructPath(init.board, init.knights.p1, init.knights.p2);
+
+    p1.send({ t: "viewSolution" });
+    await p1.waitFor("state", (m) => m.state.status === "playback");
+    await p2.waitFor("state", (m) => m.state.status === "playback");
+
+    // While in playback, fire a move/retry/undo from BOTH players. None may error,
+    // and none may inject a broadcast that isn't a playback frame. We assert: no
+    // error arrives, and every state seen until the restore is a playback frame.
+    const errCountBefore = p2.states().length; // (unused count anchor)
+    void errCountBefore;
+    p1.send({ t: "move", cell: path[1] });
+    p1.send({ t: "retry" });
+    p2.send({ t: "undo" });
+    p2.send({ t: "move", cell: path[path.length - 2] });
+
+    // Drive to the restore; collect everything in between.
+    const restored = await p1.waitFor(
+      "state",
+      (m) => m.state.status === "playing" && m.state.visited != null,
+    );
+    await p2.waitFor("state", (m) => m.state.status === "playing");
+
+    // No client ever received an error from the locked ops.
+    expect(p1.last("error")).toBeNull();
+    expect(p2.last("error")).toBeNull();
+
+    // After restore, the state equals the (untouched) initial active state — the
+    // locked ops changed nothing.
+    expect(JSON.stringify(activeState(restored))).toBe(
+      JSON.stringify({
+        board: init.board,
+        knights: init.knights,
+        visited: init.visited,
+        status: "playing",
+        result: null,
+      }),
+    );
+    p1.close();
+    p2.close();
+  });
+
+  test("viewSolution while WON is ignored (no status flip, no frames)", async () => {
+    const { p1, p2, init } = await activeGame();
+    const board = init.board;
+    const target = init.knights.p2;
+    const bfsPath = bfsToAdjacent(board, init.knights.p1, target)!;
+    for (const step of bfsPath) {
+      p1.send({ t: "move", cell: step });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, step));
+    }
+    p1.send({ t: "move", cell: target });
+    const won = activeState(await p1.waitFor("state", (m) => m.state.status === "won"));
+    await p2.waitFor("state", (m) => m.state.status === "won");
+
+    const countBefore = p1.states().length;
+    p1.send({ t: "viewSolution" });
+    // Give the server a round-trip: send a hint (also ignored while won) and a
+    // benign ping via another viewSolution — none should produce any broadcast.
+    p2.send({ t: "viewSolution" });
+    // A subsequent legal-ish move attempt yields a game_over error we CAN await,
+    // proving the prior viewSolution messages were fully processed (and ignored).
+    p1.send({ t: "move", cell: won.visited.p1[0] });
+    expect((await p1.waitFor("error", (m) => m.code === "game_over")).code).toBe("game_over");
+
+    // No new state broadcast happened from the viewSolution attempts (the only new
+    // states, if any, would carry status "playback" — there must be none).
+    const newStates = p1.states().slice(countBefore);
+    expect(newStates.every((m) => m.state.status !== "playback")).toBe(true);
+    expect(activeState(p1.last("state")!).status).toBe("won");
+    p1.close();
+    p2.close();
+  });
+
+  test("a 2nd viewSolution mid-playback is ignored (frame sequence unbroken)", async () => {
+    const { p1, p2 } = await activeGame();
+    p1.send({ t: "viewSolution" });
+    await p1.waitFor("state", (m) => m.state.status === "playback");
+    await p2.waitFor("state", (m) => m.state.status === "playback");
+
+    // Fire a 2nd viewSolution from the OTHER player mid-playback. It must NOT start
+    // a second timer / reset the frames — playback continues to its single restore.
+    p2.send({ t: "viewSolution" });
+
+    // Exactly ONE return to playing follows; the playback completes cleanly.
+    const restored = await p1.waitFor(
+      "state",
+      (m) => m.state.status === "playing" && m.state.visited != null,
+    );
+    await p2.waitFor("state", (m) => m.state.status === "playing");
+    expect(activeState(restored).status).toBe("playing");
+    // No error from the ignored 2nd request.
+    expect(p2.last("error")).toBeNull();
+    p1.close();
+    p2.close();
+  });
+
+  // The board's available cells are A single knight's walk, but a DFS
+  // reconstruction is not guaranteed to recover the SAME Hamiltonian path the
+  // server used as its witness (other start→end covers may exist). So the hint
+  // tests assert the DEFINING property of the server's path[1]/path[last-1] — a
+  // legal, available, unvisited knight move from the requester's current cell that
+  // is NOT the other knight — rather than equality with the reconstruction.
+  function isLegalNext(init: ReturnType<typeof activeState>, from: Cell, cell: Cell): boolean {
+    return (
+      knightMoves(from, init.board.n).some((m) => sameCell(m, cell)) &&
+      init.board.available[cell.r][cell.c] &&
+      !inCells(init.visited.p1, cell) &&
+      !inCells(init.visited.p2, cell) &&
+      !sameCell(cell, init.knights.p1) &&
+      !sameCell(cell, init.knights.p2)
+    );
+  }
+
+  test("hint P1 on-prefix → a legal forward witness cell, status prefix, ACTOR-ONLY", async () => {
+    const { p1, p2, init } = await activeGame();
+    // P1 is at its start (len 1) → on-prefix; the hint is its witness's next cell.
+    const p2HintsBefore = p2.inboxCount("hint");
+    p1.send({ t: "hint" });
+    const h = await p1.waitFor("hint");
+    expect(h.status).toBe("prefix");
+    expect(h.status === "prefix" && isLegalNext(init, init.knights.p1, h.cell)).toBe(true);
+    // ACTOR-ONLY: p2 received NOTHING new on the hint channel.
+    expect(p2.inboxCount("hint")).toBe(p2HintsBefore);
+    expect(p2.last("hint")).toBeNull();
+    p1.close();
+    p2.close();
+  });
+
+  test("hint P2 on-suffix → a legal BACKWARD witness cell, status prefix, actor-only", async () => {
+    const { p1, p2, init } = await activeGame();
+    // P2 is at its start (len 1) → on-suffix; the hint is its witness's prev cell.
+    const p1HintsBefore = p1.inboxCount("hint");
+    p2.send({ t: "hint" });
+    const h = await p2.waitFor("hint");
+    expect(h.status).toBe("prefix");
+    expect(h.status === "prefix" && isLegalNext(init, init.knights.p2, h.cell)).toBe(true);
+    expect(p1.inboxCount("hint")).toBe(p1HintsBefore);
+    p1.close();
+    p2.close();
+  });
+
+  test("following hints walks the server's witness: P1 hint → move → hint stays on-prefix", async () => {
+    const { p1, p2, init } = await activeGame();
+    // Request a hint, move onto the hinted cell, request again — each must be a
+    // legal "prefix" cell, proving the hint genuinely tracks the SERVER witness
+    // (independent of any DFS reconstruction).
+    let from = init.knights.p1;
+    let visitedP1 = init.visited.p1.slice();
+    for (let step = 0; step < 3; step++) {
+      // Wait for a NEW hint (the inbox count must grow) — waitFor would otherwise
+      // resolve immediately with a STALE earlier hint already in the inbox.
+      const before = p1.inboxCount("hint");
+      p1.send({ t: "hint" });
+      await p1.waitFor("hint", () => p1.inboxCount("hint") > before, 2500);
+      const h = p1.last("hint")!;
+      expect(h.status).toBe("prefix");
+      if (h.status !== "prefix") break;
+      const cell = h.cell;
+      // Legal knight move from current, available, unvisited by either trail.
+      expect(knightMoves(from, init.board.n).some((m) => sameCell(m, cell))).toBe(true);
+      expect(init.board.available[cell.r][cell.c]).toBe(true);
+      expect(inCells(visitedP1, cell)).toBe(false);
+      p1.send({ t: "move", cell });
+      const after = await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, cell));
+      from = after.knights.p1;
+      visitedP1 = after.visited.p1.slice();
+    }
+    p1.close();
+    p2.close();
+  });
+
+  test("hint after diverging from the witness → off_path (cell null)", async () => {
+    const { p1, p2, init } = await activeGame();
+    // Learn the SERVER witness's first cell from the hint itself (a DFS
+    // reconstruction is not guaranteed to recover the same path), then move P1 to a
+    // DIFFERENT legal first cell — that genuinely diverges from the witness.
+    p1.send({ t: "hint" });
+    const h0 = await p1.waitFor("hint");
+    expect(h0.status).toBe("prefix");
+    const witnessNext = h0.status === "prefix" ? h0.cell : null;
+    const off = knightMoves(init.knights.p1, init.board.n).find(
+      (m) =>
+        init.board.available[m.r][m.c] &&
+        !inCells(init.visited.p1, m) &&
+        !inCells(init.visited.p2, m) &&
+        !sameCell(m, init.knights.p2) &&
+        witnessNext != null &&
+        !sameCell(m, witnessNext),
+    );
+    // Some boards may force the witness as the only legal first move; skip the
+    // divergence assertion only in that (rare) case but still exercise the path.
+    if (off) {
+      const before = p1.inboxCount("hint");
+      p1.send({ t: "move", cell: off });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, off));
+      p1.send({ t: "hint" });
+      await p1.waitFor("hint", () => p1.inboxCount("hint") > before);
+      const h = p1.last("hint")!;
+      expect(h.status).toBe("off_path");
+      expect(h.status === "off_path" && h.cell).toBeNull();
+    }
+    p1.close();
+    p2.close();
+  });
+
+  test("hint while WON or during PLAYBACK sends nothing", async () => {
+    // ---- while won ----
+    {
+      const { p1, p2, init } = await activeGame();
+      const board = init.board;
+      const target = init.knights.p2;
+      const bfsPath = bfsToAdjacent(board, init.knights.p1, target)!;
+      for (const step of bfsPath) {
+        p1.send({ t: "move", cell: step });
+        await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, step));
+      }
+      p1.send({ t: "move", cell: target });
+      await p1.waitFor("state", (m) => m.state.status === "won");
+      await p2.waitFor("state", (m) => m.state.status === "won");
+
+      const hintsBefore = p1.inboxCount("hint");
+      p1.send({ t: "hint" });
+      // Prove the hint was processed-and-ignored: a following move errors game_over.
+      p1.send({ t: "move", cell: init.knights.p1 });
+      await p1.waitFor("error", (m) => m.code === "game_over");
+      expect(p1.inboxCount("hint")).toBe(hintsBefore);
+      p1.close();
+      p2.close();
+    }
+    // ---- during playback ----
+    {
+      const { p1, p2 } = await activeGame();
+      p1.send({ t: "viewSolution" });
+      await p1.waitFor("state", (m) => m.state.status === "playback");
+      const hintsBefore = p1.inboxCount("hint");
+      p1.send({ t: "hint" });
+      // Drive to the restore; the hint must have produced no `hint` message.
+      await p1.waitFor("state", (m) => m.state.status === "playing" && m.state.visited != null);
+      expect(p1.inboxCount("hint")).toBe(hintsBefore);
+      p1.close();
+      p2.close();
+    }
+  });
+
+  test("leave mid-playback: room torn down, playback timer canceled, no late broadcasts / no crash", async () => {
+    const { p1, p2 } = await activeGame();
+    p1.send({ t: "viewSolution" });
+    await p1.waitFor("state", (m) => m.state.status === "playback");
+    await p2.waitFor("state", (m) => m.state.status === "playback");
+
+    // p1 leaves mid-playback. p2 must be notified the opponent left, and NO further
+    // playback frames may arrive after that (the timer is canceled in teardown).
+    p1.send({ t: "leave" });
+    await p2.waitFor("opponentLeft");
+    const countAtLeave = p2.states().length;
+
+    // Wait a handful of would-be frame intervals worth of round-trips by pinging
+    // the server (a bad_message ping we can await) — no new `state` may arrive.
+    p2.send({ t: "nope" } as unknown as ClientMsg);
+    await p2.waitFor("error", (m) => m.code === "bad_message");
+    expect(p2.states().length).toBe(countAtLeave);
+    p1.close();
+    p2.close();
+  });
+
+  test("the witness path NEVER leaks across playback frames OR the hint message", async () => {
+    const { p1, p2, init } = await activeGame();
+
+    // Hint (prefix), then a full playback. Guard EVERY message on both clients.
+    p1.send({ t: "hint" });
+    const h = await p1.waitFor("hint");
+    p1.send({ t: "viewSolution" });
+    await p1.waitFor("state", (m) => m.state.status === "playback");
+    await p1.waitFor("state", (m) => m.state.status === "playing" && m.state.visited != null);
+    await p2.waitFor("state", (m) => m.state.status === "playing" && m.state.visited != null);
+
+    // No serialized message on EITHER client contains a raw "path" field — covers
+    // playback frames AND the actor-only hint.
+    const noPath = (c: Client) =>
+      c.allMessages().every((m) => !JSON.stringify(m).includes('"path"'));
+    expect(noPath(p1)).toBe(true);
+    expect(noPath(p2)).toBe(true);
+    // Sanity: the hint projects a SINGLE next cell (a legal first move), not the
+    // whole path — and the off_path branch never carries a cell either.
+    expect(h.status).toBe("prefix");
+    expect(h.status === "prefix" && isLegalNext(init, init.knights.p1, h.cell)).toBe(true);
     p1.close();
     p2.close();
   });

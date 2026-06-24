@@ -55,11 +55,16 @@ export interface Board {
  * CURRENT cell — so `knights.pX === visited.pX[last]` always holds. The witness
  * solution is NEVER projected; intentionally there is no field named `path`.
  *
- * `status` is "playing" while the rendezvous is still open and "won" once one
- * knight has hopped onto the other's square (locked decision 1). `result` is null
- * while waiting AND while playing; once won it carries whether the win was
- * `perfect` (every playable square covered by ≥1 trail) and the `meetCell` where
- * the two knights met (the one allowed shared square).
+ * `status` is "playing" while the rendezvous is still open, "won" once one knight
+ * has hopped onto the other's square (locked decision 1), and "playback" while a
+ * view-solution animation is running (locked decision 7). Playback is room-wide
+ * and REVERSIBLE: when it ends the status returns to "playing" with the
+ * pre-playback knights/visited restored — view-solution NEVER marks the puzzle
+ * solved. `result` is null while waiting AND while playing AND during playback;
+ * only once won does it carry whether the win was `perfect` (every playable square
+ * covered by ≥1 trail) and the `meetCell` where the two knights met (the one
+ * allowed shared square). The knights/visited mutate frame-by-frame during
+ * playback, so a reconnecting client sees the current frame and the rest.
  */
 export interface RoomSnapshot {
   code: string;
@@ -68,7 +73,7 @@ export interface RoomSnapshot {
   board: Board | null;
   knights: { p1: Cell; p2: Cell } | null;
   visited: { p1: Cell[]; p2: Cell[] } | null;
-  status: "playing" | "won";
+  status: "playing" | "won" | "playback";
   result: { perfect: boolean; meetCell: Cell } | null;
 }
 
@@ -88,6 +93,16 @@ export type ClientMsg =
   // Pop ONLY the sender's own last move (locked decision 6). No payload fields;
   // a benign no-op when the knight is already at its start. Forbidden once won.
   | { t: "undo" }
+  // Trigger the view-solution animation for the WHOLE room (locked decision 7):
+  // both knights animate along the witness toward the rendezvous. No payload —
+  // it is room-wide, not per-player. Ignored unless the game is "playing"; it
+  // never marks the puzzle solved and restores the prior state when it ends.
+  | { t: "viewSolution" }
+  // Ask for a witness-only hint for the SENDER's own knight (locked decision 7).
+  // No payload (the player is inferred from the bound slot); the response is
+  // ACTOR-ONLY (a `hint` ServerMsg sent to the requester alone), never broadcast.
+  // Only meaningful while "playing".
+  | { t: "hint" }
   | { t: "leave" };
 
 // ---- server → client -------------------------------------------------------
@@ -104,5 +119,13 @@ export type ServerMsg =
   // `you` and `token` are returned ONLY here — never in a broadcast.
   | { t: "joined"; code: string; you: PlayerId; token: string; state: RoomSnapshot }
   | { t: "state"; state: RoomSnapshot } // pushed on every transition
+  // ACTOR-ONLY hint response (locked decision 7): sent to the REQUESTER alone,
+  // never broadcast, so the other client learns nothing. `status:"prefix"` carries
+  // the requester's own next witness `cell`; `status:"off_path"` (cell null) means
+  // the requester has diverged from the witness. The hint is only ever produced
+  // while "playing" — there is deliberately NO "done"/"won" branch, and the raw
+  // witness `path` is NEVER projected (only the single next cell).
+  | { t: "hint"; status: "prefix"; cell: Cell }
+  | { t: "hint"; status: "off_path"; cell: null }
   | { t: "opponentLeft" }
   | { t: "error"; code: ErrorCode; message: string };
