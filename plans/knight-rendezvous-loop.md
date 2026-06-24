@@ -574,10 +574,21 @@ round-trip-chess 111/111 (incl. real-WS integration).
   4. **Resolve G2 (subdomain):** `knight-rendezvous.fly.dev` only, or a custom
      `<something>.nilmamano.com` CNAME → fly. Then fill the `og:url` + absolute
      `og:image` TODO in `index.html`.
-  5. **KP→KR back-link:** edit the live `knights-puzzle` repo (rail #2 lifts ONLY at
-     C7) to link to the new game; reviewed commit + redeploy KP (Vercel). Runs as Nil.
-- **parked-for-Nil to resolve at C7:** G2 subdomain choice; deploy mechanism
-  (GitHub Action + `FLY_API_TOKEN` vs local flyctl).
+  5. **Cross-links (edit OTHER repos — rail #2 lifts ONLY at C7; do AFTER the site is
+     live so links resolve; each a reviewed commit that redeploys its own site):**
+     - **KP→KR back-link:** edit `~/nil/knights-puzzle` to link to the new game →
+       redeploy KP (Vercel).
+     - **nilmamano.com/games entry:** add a `{name,href,domain,image,alt}` entry to
+       the `games` array in `~/nil/nilmamano.com/app/games/page.tsx` + a card image
+       `public/games/knight-rendezvous.png` → redeploy nilmamano.com. (Optionally add
+       to the page's metadata description list.)
+- **DECIDED (was G2):** custom subdomain `rendezvous.nilmamano.com` (CNAME → fly).
+  Public GitHub repo. Deploy mechanism = GitHub Action + `FLY_API_TOKEN` (copies
+  round-trip-chess). OG tags finalized to that domain (commit `9af786b`).
+- **parked-for-Nil (fly side):** local flyctl install was blocked by the harness, so
+  the one-time fly bootstrap (`fly launch`/`apps create`, `tokens create deploy`,
+  `certs add`) needs Nil's fly auth — either Nil runs it, or re-authorizes the
+  flyctl install + `fly auth login`.
 
 ---
 
