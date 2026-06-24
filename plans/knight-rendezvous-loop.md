@@ -480,6 +480,76 @@ round-trip-chess 111/111 (incl. real-WS integration).
   (`playback` status, `hint` ServerMsg, `view_solution`/`hint` ClientMsg); the C3
   full-cover `reconstructPath` split for canonical frames.
 
+## SLICE-6 PICKUP (C6 — polish + cross-links + meta) — authored after C5
+- **Baseline commit:** `01bbb4b` (C5).
+- **What C5 taught (fold in):**
+  - **"New random puzzle" is the FIRST op that mutates a room's `Game` after
+    creation.** It must go through the same timer-clearing discipline as `teardown`:
+    cancel any running `playbackTimer`, then reset `status`/`result`/`saved`,
+    regenerate the puzzle from a NEW seed, reset knights (start/end) + visited
+    ([start]/[end]). It's room-wide → `broadcast()`. Decide (diff-gate): re-seed in
+    place vs construct a new `Game`; and whether it's allowed during `playback`
+    (reject) vs cancels playback first.
+  - The single `locked = status!=="playing"` predicate in App.tsx gates all inputs;
+    any new control (New puzzle) should consult it. New-puzzle is probably allowed
+    when `won` (start over) but not mid-`playback`.
+  - The controls row already has 4 pills (Retry/Undo/Hint/View-solution) + win panel
+    + playback indicator; `data-playback`/`data-hint`/`data-win-panel` hooks exist.
+    The mobile pass must wrap/resize these plus the new button.
+  - Smoke already filters a favicon 404 as expected noise; once a favicon asset
+    lands the filter stays harmless, but the asset SHOULD exist (no prod 404).
+  - Reconnect mid-playback works; opponentLeft mid-playback cancels the timer
+    cleanly — the UX polish just needs to surface these states legibly.
+  - `colorOf` triplication still parked — opportunistic cleanup candidate.
+- **Goal:** production polish — apply the "Knight Rendezvous" name/branding
+  throughout; OG meta + favicon; a "New random puzzle" button (room-wide, fresh seed
+  for both); opponent-left / reconnect UX; mobile/responsive controls; an OUTBOUND
+  link from this game → Knight's Puzzle (https://knight.nilmamano.com). Server stays
+  the oracle; no optimistic UI.
+- **Load-bearing mechanics / traps:**
+  - **New puzzle:** add `ClientMsg {t:"newPuzzle"}` (room-wide; mirror chess
+    `newGame` shape). `Game.newPuzzle()` regenerates from a new random seed (same
+    BOARD_N/BOARD_STEPS), resets knights/visited/status/result/saved; `Room.newPuzzle`
+    cancels `playbackTimer` first (teardown discipline) then broadcasts. Keep the
+    determinism contract (broadcast the new board; both clients re-render identically;
+    `path` stays server-side).
+  - **Branding/meta:** `frontend/index.html` title/description/OG tags ("Knight
+    Rendezvous"); favicon + og.png assets (simple two-knights motif). **Do NOT
+    hardcode a production URL** — the final domain is parked-for-Nil (G2); use a
+    relative `og.png` / placeholder and note the absolute URL is finalized at C7.
+  - **Outbound cross-link ONLY:** add a small "Knight's Puzzle" / more-games link to
+    https://knight.nilmamano.com in THIS repo. **The KP→KR back-link is C7** (it
+    edits the live knights-puzzle repo — standing rail #2; do NOT do it here).
+  - **Opponent-left / reconnect UX:** surface `opponentLeft` as a clear banner; show
+    `players[].connected` ("waiting for opponent to return" during grace). Frontend.
+  - **Mobile/responsive:** controls wrap; board scales. Layout is visual — keep the
+    oracle on server state; a screenshot is an artifact, never an assertion.
+- **Acceptance criteria:**
+  - Always-run gates green.
+  - Integration: newPuzzle → both clients get a NEW identical board, knights reset to
+    start/end, visited reset, `status:"playing"`, `result:null`; newPuzzle during
+    playback handled per decision (cancel+reset or reject); newPuzzle after win
+    resets; `path` never on wire.
+  - Dual-client smoke: click "New puzzle" → both contexts get a fresh identical board
+    + reset knights; the outbound KP link is present.
+  - Branding present (title "Knight Rendezvous", favicon asset exists, OG tags present).
+- **Decide-with-(diff-gate)-subagent:** newPuzzle during playback (reject vs
+  cancel+reset); OG image/domain placeholder approach (domain is parked-for-Nil);
+  whether to collapse `colorOf` now; favicon/og asset approach (SVG vs generated).
+- **Locked (don't relitigate):** decisions 1–9, esp. **#5** (pair → straight into the
+  random-puzzle screen; no levels/localStorage — newPuzzle stays within that, no
+  catalog), **#8** (name), and **rail #2** (do NOT edit knights-puzzle — outbound link
+  only; the KP back-link is C7). Do NOT deploy / create repo / change DNS (that's C7).
+- **Resources:** `round-trip-chess` `newGame` (ClientMsg/Room shape);
+  `knights-puzzle/index.html` (OG/meta/favicon) + `public/` assets + "New random"
+  button look; `server/game.ts` (add `newPuzzle`); `shared/protocol.ts`;
+  `frontend` controls + `index.html`.
+
+> **After C6 commits:** author the C7 (deploy) handoff and **STOP the loop** — C7 is
+> optional + human-gated (deploy, GitHub repo, DNS, KP back-link all run as Nil).
+> Leave Nil a completion summary + the parked-for-Nil queue; do NOT schedule another
+> wakeup.
+
 ## SLICE-N PICKUP — authored when N-1 commits
 > Author each next handoff only AFTER the previous one commits, folding in a
 > "what slice N-1 taught" block at the top. That is where workflow knowledge
