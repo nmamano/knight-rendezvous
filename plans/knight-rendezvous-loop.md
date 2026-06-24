@@ -138,7 +138,7 @@ DNS / custom subdomain changes      # runs as Nil
 - [x] **C2 — Independent live movement + sync.** Each player hops their own knight
   (not turn-based); server validates (legal knight move, target unvisited by
   either, belongs to that player) + broadcasts; both clients see both trails.
-- [ ] **C3 — Win/meet detection.** Shared-engine rendezvous logic (same-square per
+- [x] **C3 — Win/meet detection.** Shared-engine rendezvous logic (same-square per
   locked decision 1); soft vs perfect; win panel on both clients.
 - [ ] **C4 — Retry + Undo (per-player).** Per locked decision 6.
 - [ ] **C5 — View solution (both) + Hint (per-player).** Per locked decision 7.

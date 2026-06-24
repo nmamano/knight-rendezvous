@@ -99,13 +99,15 @@ const sameCell = (a: Cell, b: Cell): boolean => a.r === b.r && a.c === b.c;
 const inCells = (cells: Cell[], c: Cell): boolean => cells.some((x) => sameCell(x, c));
 
 // The active-snapshot fields, asserted non-null (C2: board/knights/visited all
-// present once active).
+// present once active). C3 also carries the win projection (status/result).
 function activeState(s: ServerMsg & { t: "state" }) {
   const st = s.state;
   return {
     board: st.board!,
     knights: st.knights!,
     visited: st.visited!,
+    status: st.status,
+    result: st.result,
   };
 }
 
@@ -459,39 +461,221 @@ describe("C2 movement + sync (real WS)", () => {
     p2.close();
   });
 
-  // C3 ANCHOR: in C2, landing on the OTHER knight's current square is rejected.
-  // C3 will flip exactly this branch into the rendezvous win.
-  test("dedicated: reject landing on the OTHER knight's current cell → illegal_move", async () => {
+  // C3 (replaces the C2 "reject landing on the OTHER knight" anchor): landing on
+  // the OTHER knight's current square is now the rendezvous WIN.
+  test("rendezvous wins: hopping onto the OTHER knight's cell ends the game on both clients", async () => {
     const { p1, p2, init } = await activeGame();
     const board = init.board;
 
-    // Drive p1 along legal hops until it sits a knight-move away from p2's
-    // current cell, then attempt to hop ONTO p2 — only the "other knight" rule
-    // should reject it. We BFS the playable graph (the board IS a knight's walk,
-    // so it is connected) for a path start→…→adjacent-to-p2 that never steps on
-    // p2's current cell, and replay it with real moves.
+    // Drive p1 along legal hops until it sits a knight-move away from STATIONARY
+    // p2's current cell, then hop ONTO p2 — that hop is the rendezvous. We BFS the
+    // playable graph (the board IS a knight's walk, so it is connected) for a path
+    // start→…→adjacent-to-p2 that never steps on p2's cell, and replay it.
     const target = init.knights.p2; // p2 never moves in this test
     const path = bfsToAdjacent(board, init.knights.p1, target);
     expect(path).not.toBeNull();
 
     let v1 = init.visited.p1.slice();
     for (const step of path!) {
-      // Each hop must be legal at send time (BFS already guarantees availability,
-      // knight-step, and avoidance of `target`; trail-uniqueness holds because a
-      // BFS shortest path has no repeats and p2's trail is just its start).
       p1.send({ t: "move", cell: step });
       const after = await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, step));
       v1 = after.visited.p1.slice();
     }
 
-    // p1 now sits a knight-move from p2; p2's cell is available and unvisited —
-    // only the dedicated "other knight" branch blocks this hop.
+    // p1 now sits a knight-move from p2; hop ONTO p2 → the rendezvous.
     expect(knightMoves(v1[v1.length - 1], board.n).some((m) => sameCell(m, target))).toBe(true);
     p1.send({ t: "move", cell: target });
-    expect((await p1.waitFor("error")).code).toBe("illegal_move");
-    // And p2 must be unmoved.
-    const s = activeState(p1.last("state")!);
-    expect(s.knights.p2).toEqual(init.knights.p2);
+
+    // BOTH clients must observe the win.
+    const w1 = await p1.waitFor("state", (m) => m.state.status === "won");
+    const w2 = await p2.waitFor("state", (m) => m.state.status === "won");
+    for (const w of [w1, w2]) {
+      const s = activeState(w);
+      expect(s.status).toBe("won");
+      expect(s.result).not.toBeNull();
+      expect(s.result!.meetCell).toEqual(init.knights.p2);
+      // The mover (p1) now sits on p2's cell — the one allowed shared square.
+      expect(s.knights.p1).toEqual(init.knights.p2);
+      // p2 never moved.
+      expect(s.knights.p2).toEqual(init.knights.p2);
+      // Invariant survives the rendezvous: visited.p1[last] === knights.p1.
+      expect(s.visited.p1[s.visited.p1.length - 1]).toEqual(s.knights.p1);
+    }
+    p1.close();
+    p2.close();
+  });
+
+  test("perfect win TRUE: a full-cover solve meeting in the middle → status won, perfect true", async () => {
+    const { p1, p2, init } = await activeGame();
+    const board = init.board;
+
+    // Reconstruct the witness (the available cells ARE a single knight's walk).
+    // Walk both knights along DISJOINT halves consuming the WHOLE path, then meet:
+    // p1 advances forward to path[i-1], p2 retreats back to path[i+1], so p1 lands
+    // a knight-move from path[i] and p2 currently sits ON path[i]. p1 then hops
+    // onto p2 — every cell is covered, so the win is perfect.
+    const path = reconstructPath(board, init.knights.p1, init.knights.p2);
+    const last = path.length - 1;
+    // Choose the meeting cell so that after both walks, p1 is adjacent to where p2
+    // stands. p2 walks back to path[i]; p1 walks forward to path[i-1] (a knight
+    // move from path[i] since consecutive path cells are knight moves). Meet cell
+    // is path[i] — p2's final resting square.
+    const i = last - 1; // p2 retreats by exactly one, leaving p1's whole half to cover
+
+    // Walk p1 forward path[1]..path[i-1].
+    for (let j = 1; j <= i - 1; j++) {
+      const step = path[j];
+      p1.send({ t: "move", cell: step });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, step));
+    }
+    // Walk p2 backward path[last-1]..path[i] (one step: from path[last] to path[i]).
+    for (let j = last - 1; j >= i; j--) {
+      const step = path[j];
+      p2.send({ t: "move", cell: step });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p2, step));
+    }
+
+    // Now p1 sits on path[i-1] (a knight move from path[i]); p2 sits on path[i].
+    // Every cell of the path is in some trail (p1 covers 0..i-1, p2 covers i..last).
+    const pre = activeState(p1.last("state")!);
+    expect(sameCell(pre.knights.p2, path[i])).toBe(true);
+    expect(knightMoves(pre.knights.p1, board.n).some((m) => sameCell(m, path[i]))).toBe(true);
+
+    // p1 hops onto p2 → rendezvous; all cells covered → perfect.
+    p1.send({ t: "move", cell: path[i] });
+    const w1 = await p1.waitFor("state", (m) => m.state.status === "won");
+    const w2 = await p2.waitFor("state", (m) => m.state.status === "won");
+    for (const w of [w1, w2]) {
+      const s = activeState(w);
+      expect(s.status).toBe("won");
+      expect(s.result).not.toBeNull();
+      expect(s.result!.perfect).toBe(true);
+      expect(s.result!.meetCell).toEqual(path[i]);
+    }
+    p1.close();
+    p2.close();
+  });
+
+  test("premature meet → perfect FALSE (and the game STILL ends)", async () => {
+    const { p1, p2, init } = await activeGame();
+    const board = init.board;
+
+    // Drive p1 straight to a knight-move from STATIONARY p2 and hop on — leaving
+    // p2's whole half of the path uncovered, so the win is soft (perfect false).
+    // (The path is 19 cells; p1's short BFS approach covers only a handful.)
+    const target = init.knights.p2;
+    const path = bfsToAdjacent(board, init.knights.p1, target)!;
+    for (const step of path) {
+      p1.send({ t: "move", cell: step });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, step));
+    }
+    p1.send({ t: "move", cell: target });
+
+    const w1 = await p1.waitFor("state", (m) => m.state.status === "won");
+    const w2 = await p2.waitFor("state", (m) => m.state.status === "won");
+    for (const w of [w1, w2]) {
+      const s = activeState(w);
+      // Assert BOTH: the game ended AND it was not perfect (a regression that
+      // fails to end the game OR mislabels coverage must be caught).
+      expect(s.status).toBe("won");
+      expect(s.result).not.toBeNull();
+      expect(s.result!.perfect).toBe(false);
+    }
+    p1.close();
+    p2.close();
+  });
+
+  test("post-win rejection: a move after the win → game_over, state unchanged", async () => {
+    const { p1, p2, init } = await activeGame();
+    const board = init.board;
+
+    const target = init.knights.p2;
+    const path = bfsToAdjacent(board, init.knights.p1, target)!;
+    for (const step of path) {
+      p1.send({ t: "move", cell: step });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, step));
+    }
+    p1.send({ t: "move", cell: target });
+    const won = activeState(await p1.waitFor("state", (m) => m.state.status === "won"));
+    await p2.waitFor("state", (m) => m.state.status === "won");
+
+    // Snapshot the post-win state, then attempt ANY further move (p2 toward an
+    // empty knight neighbor). It must be rejected as game_over, not illegal_move.
+    const beforeJson = JSON.stringify(won);
+    const p2Neighbor = knightMoves(won.knights.p2, board.n).find(
+      (m) =>
+        board.available[m.r][m.c] && !inCells(won.visited.p1, m) && !inCells(won.visited.p2, m),
+    );
+    // If there's no clean empty neighbor, any knight-move target still hits the
+    // post-win guard FIRST; fall back to p2's own prior cell.
+    const attempt = p2Neighbor ?? won.visited.p2[0];
+    p2.send({ t: "move", cell: attempt });
+    expect((await p2.waitFor("error", (m) => m.code === "game_over")).code).toBe("game_over");
+
+    // State unchanged: p1's last broadcast state is still the winning one.
+    const after = activeState(p1.last("state")!);
+    expect(JSON.stringify(after)).toBe(beforeJson);
+    p1.close();
+    p2.close();
+  });
+
+  test("rendezvous race: both fire at the partner's cell → one win, the loser gets game_over", async () => {
+    const { p1, p2, init } = await activeGame();
+    const board = init.board;
+
+    // Reconstruct the witness; have each knight walk so it sits a knight-move from
+    // the OTHER's CURRENT cell. p1 walks forward to path[i] and p2 walks back to
+    // path[i+1] — adjacent path cells are knight moves, so p1 is a knight-move
+    // from p2's cell AND p2 is a knight-move from p1's cell. Then BOTH fire at the
+    // other's current cell un-awaited: exactly one rendezvous wins.
+    const path = reconstructPath(board, init.knights.p1, init.knights.p2);
+    const last = path.length - 1;
+    const i = Math.floor(path.length / 2);
+
+    for (let j = 1; j <= i; j++) {
+      const step = path[j];
+      p1.send({ t: "move", cell: step });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, step));
+    }
+    for (let j = last - 1; j >= i + 1; j--) {
+      const step = path[j];
+      p2.send({ t: "move", cell: step });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p2, step));
+    }
+
+    const pre = activeState(p1.last("state")!);
+    // p1 sits on path[i], p2 on path[i+1] — each a knight-move from the other.
+    expect(knightMoves(pre.knights.p1, board.n).some((m) => sameCell(m, pre.knights.p2))).toBe(
+      true,
+    );
+    expect(knightMoves(pre.knights.p2, board.n).some((m) => sameCell(m, pre.knights.p1))).toBe(
+      true,
+    );
+
+    const p1Aim = pre.knights.p2; // p1 hops onto p2
+    const p2Aim = pre.knights.p1; // p2 hops onto p1
+
+    // Fire BOTH at the partner's cell WITHOUT awaiting. The single-threaded room
+    // serializes them: the first IS the rendezvous (win); the second now hits the
+    // post-win guard → game_over (NOT illegal_move).
+    p1.send({ t: "move", cell: p1Aim });
+    p2.send({ t: "move", cell: p2Aim });
+
+    const w = await p1.waitFor("state", (m) => m.state.status === "won");
+    await p2.waitFor("state", (m) => m.state.status === "won");
+    const won = activeState(w);
+    expect(won.status).toBe("won");
+    expect(won.result).not.toBeNull();
+
+    // Exactly one of the two aims is the meet cell (the winner's target).
+    const meetIsP1Aim = sameCell(won.result!.meetCell, p1Aim);
+    const meetIsP2Aim = sameCell(won.result!.meetCell, p2Aim);
+    expect(meetIsP1Aim !== meetIsP2Aim).toBe(true);
+
+    // The loser (whoever did NOT win) gets game_over, not illegal_move.
+    const loser = meetIsP1Aim ? p2 : p1;
+    expect((await loser.waitFor("error", (m) => m.code === "game_over")).code).toBe("game_over");
+
     p1.close();
     p2.close();
   });
@@ -536,62 +720,61 @@ describe("C2 movement + sync (real WS)", () => {
     p2.close();
   });
 
-  test("concurrency: two moves to the SAME target → exactly one state, one illegal_move", async () => {
+  // C2 concurrency regression, kept green under C3 rules. NOTE: under same-square
+  // rendezvous, two un-awaited moves to the same EMPTY cell can NO LONGER both be
+  // a simple race — the first lands normally, then the second (now onto the
+  // winner's current cell) is the rendezvous WIN, not an error (see the dedicated
+  // "rendezvous race" test). So the surviving NON-rendezvous same-target
+  // concurrency case is a race onto an already-VISITED cell: both moves must be
+  // rejected as no-reuse `illegal_move`, proving the win-check does NOT swallow
+  // ordinary rejections and the game stays "playing".
+  test("concurrency: two moves to the SAME already-visited cell → both illegal_move, no win", async () => {
     const { p1, p2, init } = await activeGame();
     const board = init.board;
 
-    // Reconstruct the witness path and pick a MIDDLE meeting cell T. p1 (at
-    // path[0]) walks up to path[i-1] and p2 (at path[last]) walks down to
-    // path[i+1]; both then sit a knight-move from T = path[i] along DISJOINT
-    // halves of the path. This guarantees a shared, legal concurrent target on
-    // ANY random board (no seed pinning needed).
+    // Reconstruct the witness. p1 walks forward two hops, leaving V = path[1] as a
+    // VISITED cell that is no longer anyone's CURRENT square (p1 now sits on
+    // path[2]). p2 stays on its start (path[last]). Both clients then fire at V
+    // un-awaited.
+    //
+    // Why this is the surviving NON-rendezvous same-target concurrency case under
+    // C3's same-square rendezvous: a race onto an EMPTY cell can no longer yield a
+    // plain "loser illegal" — the second mover lands on the winner and that is the
+    // WIN (see the dedicated "rendezvous race" test). The only same-target race
+    // that stays an error is one onto an already-VISITED cell: p1's move is a
+    // no-reuse rejection (V is in its own trail); p2's move is rejected too (V is
+    // not a knight-move from path[last] in this board, and even if it were it is
+    // visited) — both `illegal_move`, the game stays "playing", proving the
+    // win-check does NOT swallow ordinary rejections.
     const path = reconstructPath(board, init.knights.p1, init.knights.p2);
-    const i = Math.floor(path.length / 2);
-    const target = path[i];
+    const last = path.length - 1;
+    expect(last).toBeGreaterThan(2);
 
-    // Walk p1 forward: path[1] .. path[i-1].
-    for (let j = 1; j < i; j++) {
-      const step = path[j];
-      p1.send({ t: "move", cell: step });
-      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, step));
+    for (let j = 1; j <= 2; j++) {
+      p1.send({ t: "move", cell: path[j] });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, path[j]));
     }
-    // Walk p2 backward: path[last-1] .. path[i+1].
-    for (let j = path.length - 2; j > i; j--) {
-      const step = path[j];
-      p2.send({ t: "move", cell: step });
-      await awaitMoveApplied(p1, p2, (v) => inCells(v.p2, step));
-    }
+    const V = path[1]; // visited by p1, not anyone's current cell
 
-    // Sanity: both knights are now a knight-move from T and T is unvisited.
     const pre = activeState(p1.last("state")!);
-    expect(knightMoves(pre.knights.p1, board.n).some((m) => sameCell(m, target))).toBe(true);
-    expect(knightMoves(pre.knights.p2, board.n).some((m) => sameCell(m, target))).toBe(true);
-    expect(inCells(pre.visited.p1, target) || inCells(pre.visited.p2, target)).toBe(false);
+    expect(inCells(pre.visited.p1, V)).toBe(true);
+    expect(sameCell(pre.knights.p1, V)).toBe(false);
+    expect(sameCell(pre.knights.p2, V)).toBe(false);
+    expect(pre.status).toBe("playing");
+    // p1 IS a knight-move from V (it just came from there) so p1's move reaches
+    // the no-reuse check; this is the no-reuse rejection we care about.
+    expect(knightMoves(pre.knights.p1, board.n).some((m) => sameCell(m, V))).toBe(true);
 
-    // Send BOTH moves to the same target WITHOUT awaiting between sends. The
-    // single-threaded room serializes them: first valid wins, the other errors.
-    p1.send({ t: "move", cell: target });
-    p2.send({ t: "move", cell: target });
+    // Fire BOTH at the visited cell V WITHOUT awaiting. Both must be rejected as
+    // illegal_move, and the game must remain unwon (no rendezvous on a visited
+    // cell — the win-check only fires on the OTHER knight's CURRENT cell).
+    p1.send({ t: "move", cell: V });
+    p2.send({ t: "move", cell: V });
+    expect((await p1.waitFor("error", (m) => m.code === "illegal_move")).code).toBe("illegal_move");
+    expect((await p2.waitFor("error", (m) => m.code === "illegal_move")).code).toBe("illegal_move");
 
-    // Collect both outcomes. Exactly one client's knight advances to T (a state),
-    // and exactly one client gets an illegal_move.
-    const winnerState = await awaitMoveApplied(
-      p1,
-      p2,
-      (v) => inCells(v.p1, target) || inCells(v.p2, target),
-    );
-
-    const p1Landed = inCells(winnerState.visited.p1, target);
-    const p2Landed = inCells(winnerState.visited.p2, target);
-    // Exactly one of them landed on T.
-    expect(p1Landed !== p2Landed).toBe(true);
-
-    // The loser received an illegal_move.
-    const loser = p1Landed ? p2 : p1;
-    expect((await loser.waitFor("error", (m) => m.code === "illegal_move")).code).toBe(
-      "illegal_move",
-    );
-
+    // No win happened; last state is still "playing".
+    expect(activeState(p1.last("state")!).status).toBe("playing");
     p1.close();
     p2.close();
   });

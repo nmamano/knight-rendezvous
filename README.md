@@ -14,6 +14,6 @@ square**. Move freely, no turns.
 Built via a gated slice loop — see [`plans/knight-rendezvous-loop.md`](plans/knight-rendezvous-loop.md).
 
 ## Status
-C2 done — both players hop their own knight live (not turn-based); the server
-validates every move and broadcasts, so both clients see both knights and both
-trails in sync. Next: C3 (rendezvous / same-square win).
+C3 done — the game is winnable: when one knight hops onto the other knight's
+square the two meet (rendezvous), both clients show a win panel ("Perfect!" when
+every square is covered), and further moves are blocked. Next: C4 (retry + undo).

@@ -1,4 +1,4 @@
-// Dual-client real-browser smoke gate for Knight Rendezvous (C2).
+// Dual-client real-browser smoke gate for Knight Rendezvous (C3).
 //
 // Boots ONE Bun server (server/index.ts) on reserved port 4318 serving the built
 // frontend/dist, then drives TWO headless system-Chrome contexts: context A
@@ -8,12 +8,14 @@
 // assert board/knights/visited are byte-identical (same seed + available +
 // start + end), and that knights p1 = board.start, p2 = board.end.
 //
-// C2: each context then performs ONE legal hop — a legal knight target is
-// computed from the shared engine's rule against window.__KR__'s board + knight +
-// visited, then the matching [data-cell] is clicked. We assert (via the server-
-// authoritative window.__KR__ on BOTH contexts) that both knights advanced and
-// both `visited` trails grew, and that the post-move board/knights/visited are
-// byte-identical across the two clients.
+// C3: reconstructs the witness path from the broadcast board, walks BOTH knights
+// along DISJOINT halves until they are adjacent (covering the WHOLE board), then
+// performs the MEET-HOP — p1 clicks the cell the other knight currently occupies,
+// the rendezvous. The meet-hop is guarded ONLY by knight-move legality (NOT a
+// "legal move excluding the other knight" helper, which by construction cannot
+// target the partner). We then assert (via the server-authoritative window.__KR__
+// on BOTH contexts) status==="won" and result.perfect===true (full coverage), and
+// that the post-win state is byte-identical across the two clients.
 //
 // The rendered DOM (the cell grid + two knight overlays) is confirmed only as a
 // health check. pageerror is strict; only expected WS/resource console noise is
@@ -82,43 +84,62 @@ async function waitForReady(page) {
   });
 }
 
-// Compute one legal knight target for `pid` inside the browser, from the shared
-// engine's rule applied to the live window.__KR__ snapshot: a knight move onto an
-// available square not in either trail and not the other knight's current cell.
-// Returns { r, c } or null (dead end). Mirrors Game.move's validation.
-function computeLegalTarget(page, pid) {
-  return page.evaluate((pid) => {
-    const s = window.__KR__;
-    const { board, knights, visited } = s;
-    const n = board.n;
-    const from = knights[pid];
-    const otherPid = pid === "p1" ? "p2" : "p1";
-    const other = knights[otherPid];
-    const deltas = [
-      [-2, -1],
-      [-2, 1],
-      [-1, -2],
-      [-1, 2],
-      [1, -2],
-      [1, 2],
-      [2, -1],
-      [2, 1],
-    ];
-    const inTrail = (cell) =>
-      visited.p1.some((v) => v.r === cell.r && v.c === cell.c) ||
-      visited.p2.some((v) => v.r === cell.r && v.c === cell.c);
-    for (const [dr, dc] of deltas) {
-      const r = from.r + dr;
-      const c = from.c + dc;
-      if (r < 0 || r >= n || c < 0 || c >= n) continue;
-      if (!board.available[r][c]) continue;
-      const cell = { r, c };
-      if (inTrail(cell)) continue;
-      if (other.r === r && other.c === c) continue;
-      return cell;
+// The 8 knight offsets — Node-side mirror of shared/engine's KNIGHT_DELTAS, used
+// to reconstruct the witness path and to guard the MEET-HOP by knight-move
+// legality ONLY. The rendezvous hop targets the OTHER knight's current cell, so a
+// "legal move that excludes the other knight" helper cannot drive it.
+const DELTAS = [
+  [-2, -1],
+  [-2, 1],
+  [-1, -2],
+  [-1, 2],
+  [1, -2],
+  [1, 2],
+  [2, -1],
+  [2, 1],
+];
+const sameCell = (a, b) => a.r === b.r && a.c === b.c;
+function knightMovesOf(cell, n) {
+  const out = [];
+  for (const [dr, dc] of DELTAS) {
+    const r = cell.r + dr;
+    const c = cell.c + dc;
+    if (r >= 0 && r < n && c >= 0 && c < n) out.push({ r, c });
+  }
+  return out;
+}
+
+// Reconstruct the witness path (start → end) by DFS over the playable graph. The
+// board's available cells ARE a single non-revisiting knight's walk, so DFS from
+// `start` covering all available cells and ending at `end` recovers it. This lets
+// the smoke walk BOTH knights from the two ends toward a shared meeting cell along
+// DISJOINT halves, covering the whole board → a PERFECT rendezvous.
+function reconstructPath(board, start, end) {
+  const n = board.n;
+  const cells = [];
+  for (let r = 0; r < n; r++)
+    for (let c = 0; c < n; c++) if (board.available[r][c]) cells.push({ r, c });
+  const total = cells.length;
+  const enc = (cell) => cell.r * n + cell.c;
+  const visited = new Set();
+  const path = [];
+  const dfs = (cur) => {
+    path.push(cur);
+    visited.add(enc(cur));
+    if (path.length === total) {
+      if (sameCell(cur, end)) return true;
+    } else {
+      for (const m of knightMovesOf(cur, n)) {
+        if (!board.available[m.r][m.c] || visited.has(enc(m))) continue;
+        if (dfs(m)) return true;
+      }
     }
-    return null;
-  }, pid);
+    path.pop();
+    visited.delete(enc(cur));
+    return false;
+  };
+  if (!dfs(start)) throw new Error("could not reconstruct the witness path in smoke");
+  return path;
 }
 
 let server;
@@ -215,76 +236,143 @@ try {
     if (p1Cell !== 1) throw new Error(`[${label}] p1 start cell not in the grid`);
   }
 
-  // ---- C2: each context performs ONE legal hop of its OWN knight ----------
+  // ---- C3: drive a FULL-COVER rendezvous to a PERFECT win -----------------
   // pageA created the room (p1), pageB joined it (p2). Verify that binding, then
-  // each context computes a legal target from the shared rule and clicks it.
+  // walk both knights along DISJOINT halves of the reconstructed witness until
+  // they are adjacent, and finally MEET-HOP one onto the other so the whole board
+  // is covered → a perfect rendezvous. Both contexts must then read status==="won"
+  // and result.perfect===true (asserted against the server-authoritative snapshot).
   const youA = await pageA.evaluate(() => window.__KR__.you);
   const youB = await pageB.evaluate(() => window.__KR__.you);
   if (youA !== "p1" || youB !== "p2") {
     throw new Error(`unexpected player binding: A=${youA} B=${youB}`);
   }
 
-  // Drive the two hops SEQUENTIALLY (compute → click → wait for both clients to
-  // observe it) so p1's hop can't invalidate p2's pre-computed target. Each
-  // target is recomputed fresh against the latest server-authoritative snapshot.
-  async function hopAndConverge(actorPage, pid, expectLen) {
-    const target = await computeLegalTarget(actorPage, pid);
-    if (!target) throw new Error(`no legal hop available for ${pid}`);
-    // Permissive click; server is authoritative. NO optimistic UI — we wait for
-    // the resulting server `state` to land on BOTH clients.
+  // Reconstruct the witness from the (server-broadcast) board; the available cells
+  // ARE a single knight's walk start → end.
+  const path = reconstructPath(boardA, boardA.start, boardA.end);
+  const last = path.length - 1;
+  // Split the path so the two halves cover EVERY cell with no overlap until the
+  // meet. p1 walks forward to path[last-1]; p2 retreats one step to path[last].
+  // Wait — p2 starts ON path[last] (= board.end), so p2 must vacate so p1 can land
+  // there. Instead: p2 retreats back to path[k]; p1 advances to path[k-1] (a
+  // knight move from path[k]); p1 then hops onto p2 at path[k]. With k = last-? we
+  // want p2's trail = path[k..last] and p1's trail = path[0..k-1], union = all.
+  // Choosing k = 1 makes p2 walk almost the whole board and p1 stay near start;
+  // choosing k = last-1 is the inverse. Use the midpoint so neither half dead-ends.
+  const meetK = Math.floor(last / 2);
+  const meetCell = path[meetK]; // p2's final resting square == the rendezvous cell
+
+  // Click `target` for `actorPage` and wait for BOTH contexts to observe the
+  // server state where `pid`'s knight sits on `target`.
+  async function hopAndConverge(actorPage, pid, target) {
     await actorPage.locator(`[data-cell="${target.r}-${target.c}"]`).click();
     for (const page of [pageA, pageB]) {
       await page.waitForFunction(
-        ([p, t, len]) => {
+        ([p, t]) => {
           const s = window.__KR__;
-          if (!s || !s.knights || !s.visited) return false;
+          if (!s || !s.knights) return false;
           const k = s.knights[p];
-          return k.r === t.r && k.c === t.c && s.visited[p].length === len;
+          return k.r === t.r && k.c === t.c;
         },
-        [pid, target, expectLen],
+        [pid, target],
         { timeout: 15000 },
       );
     }
-    return target;
   }
 
-  const targetA = await hopAndConverge(pageA, "p1", 2);
-  const targetB = await hopAndConverge(pageB, "p2", 2);
+  // p1 walks forward path[1]..path[meetK-1].
+  for (let j = 1; j <= meetK - 1; j++) {
+    await hopAndConverge(pageA, "p1", path[j]);
+  }
+  // p2 walks backward path[last-1]..path[meetK].
+  for (let j = last - 1; j >= meetK; j--) {
+    await hopAndConverge(pageB, "p2", path[j]);
+  }
 
-  // ---- ORACLE: post-move board/knights/visited byte-identical on both --------
-  const afterA = await pageA.evaluate(() => ({
+  // Sanity (server oracle): p2 rests on meetCell, p1 is a knight-move from it, the
+  // game is still playing, and the union of trails already covers every cell.
+  const pre = await pageA.evaluate(() => ({
     knights: window.__KR__.knights,
     visited: window.__KR__.visited,
+    status: window.__KR__.status,
     board: window.__KR__.board,
   }));
-  const afterB = await pageB.evaluate(() => ({
-    knights: window.__KR__.knights,
-    visited: window.__KR__.visited,
-    board: window.__KR__.board,
-  }));
-  if (JSON.stringify(afterA) !== JSON.stringify(afterB)) {
+  if (!sameCell(pre.knights.p2, meetCell)) {
     throw new Error(
-      `post-move state differs between contexts:\n  A=${JSON.stringify(afterA)}\n  B=${JSON.stringify(afterB)}`,
+      `p2 not on the meet cell: ${JSON.stringify(pre.knights.p2)} vs ${JSON.stringify(meetCell)}`,
     );
   }
-  // Both knights actually advanced off their start endpoints.
-  if (JSON.stringify(afterA.knights.p1) === JSON.stringify(boardA.start)) {
-    throw new Error("p1 knight did not advance off its start");
+  if (!knightMovesOf(pre.knights.p1, boardA.n).some((m) => sameCell(m, meetCell))) {
+    throw new Error("p1 is not a knight-move from the meet cell before the hop");
   }
-  if (JSON.stringify(afterA.knights.p2) === JSON.stringify(boardA.end)) {
-    throw new Error("p2 knight did not advance off its end");
+  if (pre.status !== "playing") {
+    throw new Error(`expected status "playing" before the meet-hop, got ${pre.status}`);
   }
-  // Both trails grew identically (start + 1 hop), and the witness path stays gone.
-  if (afterA.visited.p1.length !== 2 || afterA.visited.p2.length !== 2) {
-    throw new Error(`trails did not grow as expected: ${JSON.stringify(afterA.visited)}`);
+  const coveredBefore = new Set();
+  for (const v of pre.visited.p1) coveredBefore.add(v.r * boardA.n + v.c);
+  for (const v of pre.visited.p2) coveredBefore.add(v.r * boardA.n + v.c);
+  let availableCells = 0;
+  for (let r = 0; r < boardA.n; r++)
+    for (let c = 0; c < boardA.n; c++) if (boardA.available[r][c]) availableCells++;
+  if (coveredBefore.size !== availableCells) {
+    throw new Error(
+      `pre-hop coverage ${coveredBefore.size} != available ${availableCells}; meet-hop would not be perfect`,
+    );
   }
-  if (JSON.stringify(afterA.visited) !== JSON.stringify(afterB.visited)) {
-    throw new Error("trails differ between contexts after the hops");
-  }
-  for (const after of [afterA, afterB]) {
-    if (JSON.stringify(after).includes('"path"')) {
-      throw new Error("post-move snapshot leaked the witness path");
+
+  // ---- THE MEET-HOP: p1 hops ONTO p2's current cell (the rendezvous) ----------
+  // Guarded ONLY by knight-move legality (we already verified adjacency above) —
+  // NOT computeLegalTarget, which excludes the other knight's cell.
+  await pageA.locator(`[data-cell="${meetCell.r}-${meetCell.c}"]`).click();
+
+  // ---- ORACLE: both contexts read a perfect WIN -------------------------------
+  for (const [page, label] of [
+    [pageA, "A"],
+    [pageB, "B"],
+  ]) {
+    await page.waitForFunction(() => window.__KR__ && window.__KR__.status === "won", {
+      timeout: 15000,
+    });
+    const result = await page.evaluate(() => window.__KR__.result);
+    if (!result) throw new Error(`[${label}] won but result is null`);
+    if (result.perfect !== true) {
+      throw new Error(`[${label}] expected perfect:true, got ${JSON.stringify(result)}`);
     }
+    if (!sameCell(result.meetCell, meetCell)) {
+      throw new Error(
+        `[${label}] meetCell mismatch: ${JSON.stringify(result.meetCell)} vs ${JSON.stringify(meetCell)}`,
+      );
+    }
+  }
+
+  // Post-win state must be byte-identical across the two contexts, and the witness
+  // path must STILL never have leaked.
+  const wonA = await pageA.evaluate(() => ({
+    knights: window.__KR__.knights,
+    visited: window.__KR__.visited,
+    board: window.__KR__.board,
+    status: window.__KR__.status,
+    result: window.__KR__.result,
+  }));
+  const wonB = await pageB.evaluate(() => ({
+    knights: window.__KR__.knights,
+    visited: window.__KR__.visited,
+    board: window.__KR__.board,
+    status: window.__KR__.status,
+    result: window.__KR__.result,
+  }));
+  if (JSON.stringify(wonA) !== JSON.stringify(wonB)) {
+    throw new Error(
+      `post-win state differs between contexts:\n  A=${JSON.stringify(wonA)}\n  B=${JSON.stringify(wonB)}`,
+    );
+  }
+  // The mover (p1) now sits on the meet cell — the one allowed shared square.
+  if (!sameCell(wonA.knights.p1, meetCell)) {
+    throw new Error("p1 knight is not on the meet cell after the rendezvous");
+  }
+  if (JSON.stringify(wonA).includes('"path"')) {
+    throw new Error("post-win snapshot leaked the witness path");
   }
 
   if (pageErrors.length) {
@@ -302,11 +390,14 @@ try {
         start: boardA.start,
         end: boardA.end,
         startKnights: knightsA,
-        hops: { p1: targetA, p2: targetB },
-        afterKnights: afterA.knights,
-        afterVisited: afterA.visited,
+        meetCell,
+        status: wonA.status,
+        result: wonA.result,
+        afterKnights: wonA.knights,
+        coveredCells: coveredBefore.size,
+        availableCells,
         identicalBoards: true,
-        identicalTrails: true,
+        identicalWinState: true,
         chrome: browser.version(),
       },
       null,

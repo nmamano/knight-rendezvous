@@ -1,7 +1,7 @@
 // Authoritative game state for one room. Fresh for Knight Rendezvous — NOT a
 // port of chess's turn-based Match. It holds the generated puzzle, the two knight
-// positions, and each knight's trail. C2 adds independent (non-turn-based)
-// movement; C3 will add rendezvous (same-square win) detection.
+// positions, and each knight's trail. C2 added independent (non-turn-based)
+// movement; C3 adds rendezvous (same-square win) detection + win status.
 //
 // The server is the only oracle: it generates the puzzle ONCE per room from a
 // random seed and projects a client-facing Board snapshot. The witness `path`
@@ -9,7 +9,12 @@
 
 import { generatePuzzle, knightMoves, type Cell, type Puzzle } from "../shared/engine";
 import { BOARD_N, BOARD_STEPS } from "../shared/config";
-import type { Board, ColorToken, PlayerId, PlayerView } from "../shared/protocol";
+import type { Board, ColorToken, PlayerId, PlayerView, RoomSnapshot } from "../shared/protocol";
+
+// The win projection: `status` flips to "won" on the rendezvous hop, and
+// `result` (null while playing) then carries soft-vs-perfect + where they met.
+type GameStatus = RoomSnapshot["status"];
+type GameResult = RoomSnapshot["result"];
 
 export interface GamePlayer {
   id: PlayerId;
@@ -19,15 +24,21 @@ export interface GamePlayer {
 
 // Discriminated result for a move attempt, mirroring chess's Match.move →
 // Room.move contract (an ActionResult). On failure, the room sends the error to
-// the ACTOR only; on success, it broadcasts the new state.
+// the ACTOR only; on success, it broadcasts the new state. The failure `code` is
+// `illegal_move` for a rule violation and `game_over` once the rendezvous has
+// already happened (the post-win guard, check (0)).
 export interface MoveError {
-  code: "illegal_move";
+  code: "illegal_move" | "game_over";
   message: string;
 }
 export type MoveResult = { ok: true } | { ok: false; error: MoveError };
 
 function fail(message: string): MoveResult {
   return { ok: false, error: { code: "illegal_move", message } };
+}
+
+function gameOver(message: string): MoveResult {
+  return { ok: false, error: { code: "game_over", message } };
 }
 
 const otherPid = (pid: PlayerId): PlayerId => (pid === "p1" ? "p2" : "p1");
@@ -56,6 +67,11 @@ export class Game {
   // Each knight's trail (ordered visited squares, including its start). Seeded
   // here so C2's movement/sync has the structure ready; unused in C1 rendering.
   readonly visited: { p1: Cell[]; p2: Cell[] };
+  // Win status. "playing" until the rendezvous hop flips it to "won" (forever —
+  // there is no un-winning in C3). `result` stays null until then, then carries
+  // soft-vs-perfect + the shared meeting cell.
+  status: GameStatus = "playing";
+  result: GameResult = null;
 
   constructor(
     readonly players: { p1: GamePlayer; p2: GamePlayer },
@@ -80,21 +96,33 @@ export class Game {
    * Validation runs in a fixed order; crucially we bounds-check `cell` BEFORE
    * indexing `available`, so a malformed/off-board target is a clean
    * `illegal_move`, never a crash:
+   *   (0) POST-WIN GUARD (first, unconditional): if already `won`, short-circuit
+   *       with `game_over`. No move may follow the rendezvous.
    *   (a) `cell` is a legal knight move from this knight's CURRENT cell;
    *   (b) `cell` is in-bounds AND available[r][c] is true;
-   *   (c) `cell` is not in union(visited.p1, visited.p2);
-   *   (d) `cell` is not the OTHER knight's current cell.
+   *   (W) RENDEZVOUS WIN-CHECK: if `cell` is the OTHER knight's CURRENT cell, this
+   *       hop IS the win (locked decision 1) — the SOLE allowed exception to
+   *       no-reuse. It runs BEFORE (c) precisely because the partner's cell is the
+   *       last entry of its own trail, so (c) would otherwise reject it. We append
+   *       `cell` to visited[pid] and set knights[pid] = cell (keeping the
+   *       invariant `knights.pX === visited.pX[last]`; the two knights now share
+   *       that one square), flip status to "won", and compute `perfect`.
+   *   (c) `cell` is not in union(visited.p1, visited.p2) (no-reuse spans both).
    *
-   * (c) already subsumes (d) today (the other knight's current cell is the last
-   * entry of its trail), but (d) is kept as a SEPARATE, explicitly-named branch
-   * on purpose: C3 flips exactly THIS branch into the rendezvous win. A
-   * dedicated test anchors it.
+   * The old C2 check (d) ("cannot land on the OTHER knight") is GONE: (W) now
+   * handles the partner's cell as the win, and that is the only no-reuse exception.
    *
-   * On success: push `cell` onto visited[pid] and set knights[pid] = cell.
+   * On a non-win success: push `cell` onto visited[pid] and set knights[pid].
    */
   move(pid: PlayerId, cell: Cell): MoveResult {
     const n = this.puzzle.n;
     const current = this.knights[pid];
+
+    // (0) post-win guard FIRST — unconditional short-circuit. Once the rendezvous
+    // has happened the game is over; no further move is accepted from either side.
+    if (this.status === "won") {
+      return gameOver("The game is over.");
+    }
 
     // (a) legal knight move from the current cell.
     const reachable = knightMoves(current, n);
@@ -112,17 +140,37 @@ export class Game {
       return fail("That square is not part of the board.");
     }
 
-    // (c) not already visited by EITHER knight (no-reuse spans both trails).
+    // (W) rendezvous win-check — AFTER (a)/(b), BEFORE (c). Landing on the OTHER
+    // knight's CURRENT cell is the win (the one allowed shared square). Must beat
+    // (c), which would otherwise reject the partner's cell as already visited.
+    if (sameCell(cell, this.knights[otherPid(pid)])) {
+      this.visited[pid].push({ r: cell.r, c: cell.c });
+      this.knights[pid] = { r: cell.r, c: cell.c };
+      this.status = "won";
+      // Perfect = every playable square is covered by ≥1 trail. Count DISTINCT
+      // cells across both trails (keyed r*n+c, NOT Board.tsx's r*1000+c) and
+      // compare to the number of available-true cells (counted inline so the
+      // engine's public surface is untouched).
+      const covered = new Set<number>();
+      for (const v of this.visited.p1) covered.add(v.r * n + v.c);
+      for (const v of this.visited.p2) covered.add(v.r * n + v.c);
+      let availableCells = 0;
+      for (let r = 0; r < n; r++) {
+        for (let c = 0; c < n; c++) {
+          if (this.puzzle.available[r][c]) availableCells++;
+        }
+      }
+      const perfect = covered.size === availableCells;
+      this.result = { perfect, meetCell: { r: cell.r, c: cell.c } };
+      return { ok: true };
+    }
+
+    // (c) not already visited by EITHER knight (no-reuse spans both trails). The
+    // rendezvous hop (W) above is the only square this rule does not guard.
     const visitedByEither = (c: Cell): boolean =>
       this.visited.p1.some((v) => sameCell(v, c)) || this.visited.p2.some((v) => sameCell(v, c));
     if (visitedByEither(cell)) {
       return fail("That square has already been visited.");
-    }
-
-    // (d) not the OTHER knight's current cell. C3 anchor: this exact branch
-    // becomes the rendezvous win. For C2 it is REJECTED.
-    if (sameCell(cell, this.knights[otherPid(pid)])) {
-      return fail("You cannot land on the other knight.");
     }
 
     this.visited[pid].push({ r: cell.r, c: cell.c });
@@ -166,6 +214,23 @@ export class Game {
     return {
       p1: this.visited.p1.map((c) => ({ r: c.r, c: c.c })),
       p2: this.visited.p2.map((c) => ({ r: c.r, c: c.c })),
+    };
+  }
+
+  /**
+   * Project the win state. `status` defaults "playing"; `result` stays null until
+   * the rendezvous flips status to "won", then carries soft-vs-perfect + the
+   * shared meeting cell (cloned, same no-leak discipline as the other snapshots).
+   */
+  snapshotStatus(): GameStatus {
+    return this.status;
+  }
+
+  snapshotResult(): GameResult {
+    if (!this.result) return null;
+    return {
+      perfect: this.result.perfect,
+      meetCell: { r: this.result.meetCell.r, c: this.result.meetCell.c },
     };
   }
 

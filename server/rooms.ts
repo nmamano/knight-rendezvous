@@ -202,6 +202,9 @@ export class Room {
         board: null,
         knights: null,
         visited: null,
+        // No game yet → nothing has been played, so we are "playing" with no result.
+        status: "playing",
+        result: null,
       };
     }
     return {
@@ -211,6 +214,8 @@ export class Room {
       board: this.game.board(),
       knights: this.game.snapshotKnights(),
       visited: this.game.snapshotVisited(),
+      status: this.game.snapshotStatus(),
+      result: this.game.snapshotResult(),
     };
   }
 

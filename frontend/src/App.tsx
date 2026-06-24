@@ -72,6 +72,32 @@ function PlayerTag({ name, color, you }: { name: string; color: string; you: boo
   );
 }
 
+// Shown on BOTH clients once the rendezvous lands (snapshot.status === "won").
+// `perfect` distinguishes a full-cover perfect win (a badge) from a soft win
+// (a gentler "you met!" message).
+function WinPanel({ perfect }: { perfect: boolean }) {
+  return (
+    <div
+      role="status"
+      data-win-panel={perfect ? "perfect" : "soft"}
+      className="flex flex-col items-center gap-2 rounded-2xl border-2 border-[var(--accent)] bg-white px-6 py-4 shadow-[0_4px_0_0_#d6d8e6]"
+    >
+      <p className="text-2xl font-extrabold" style={{ color: "var(--accent)" }}>
+        Rendezvous!
+      </p>
+      {perfect ? (
+        <span className="rounded-full bg-[var(--accent)] px-3 py-1 text-sm font-bold text-white">
+          ✦ Perfect! Every square covered ✦
+        </span>
+      ) : (
+        <p className="text-sm font-semibold text-[#6b6580]">
+          You met! Some squares were left uncovered — go for a perfect next time.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function App() {
   const [status, setStatus] = useState<Status>("connecting");
   const [you, setYou] = useState<PlayerId | null>(null);
@@ -109,8 +135,9 @@ export function App() {
           setYou(null);
           setSnapshot(null);
         } else {
-          // An in-game rejection (illegal_move, …): keep the room and surface a
-          // transient toast. Bump the nonce so an identical message re-fires it.
+          // An in-game rejection (illegal_move / game_over / bad_message): keep the
+          // room and surface a transient toast. Bump the nonce so an identical
+          // message re-fires it. A post-win `game_over` flows through here too.
           setActionNonce((n) => n + 1);
         }
         break;
@@ -210,6 +237,7 @@ export function App() {
   } else if (snapshot.board && snapshot.knights && snapshot.visited) {
     const me = snapshot.players.find((p) => p.id === you);
     const opp = snapshot.players.find((p) => p.id !== you);
+    const won = snapshot.status === "won";
     view = (
       <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col items-center justify-center gap-6 px-4 py-10 text-center">
         <h1 className="text-3xl font-extrabold tracking-tight" style={{ color: "#3a3357" }}>
@@ -223,16 +251,23 @@ export function App() {
           board={snapshot.board}
           knights={snapshot.knights}
           visited={snapshot.visited}
-          onMove={move}
+          // Lock the board on a win — do NOT rely on the server error as the only
+          // guard. A no-op onMove means clicks are ignored client-side too.
+          onMove={won ? () => {} : move}
         />
+        {won && snapshot.result ? (
+          <WinPanel perfect={snapshot.result.perfect} />
+        ) : (
+          <p className="text-sm text-[#6b6580]">
+            Hop your knight onto the other knight to rendezvous. Cover every square for a perfect
+            win!
+          </p>
+        )}
         {opponentLeft && (
           <p className="rounded-2xl bg-[#9a4a4a]/10 px-4 py-2 text-sm font-semibold text-[#9a4a4a]">
             Your opponent left the room.
           </p>
         )}
-        <p className="text-sm text-[#6b6580]">
-          Hop your knight to a knight-move square. The other knight is blocked — for now.
-        </p>
       </main>
     );
   }

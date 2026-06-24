@@ -54,6 +54,12 @@ export interface Board {
  * `visited.pX[0]` is the start cell and `visited.pX[last]` is the knight's
  * CURRENT cell — so `knights.pX === visited.pX[last]` always holds. The witness
  * solution is NEVER projected; intentionally there is no field named `path`.
+ *
+ * `status` is "playing" while the rendezvous is still open and "won" once one
+ * knight has hopped onto the other's square (locked decision 1). `result` is null
+ * while waiting AND while playing; once won it carries whether the win was
+ * `perfect` (every playable square covered by ≥1 trail) and the `meetCell` where
+ * the two knights met (the one allowed shared square).
  */
 export interface RoomSnapshot {
   code: string;
@@ -62,6 +68,8 @@ export interface RoomSnapshot {
   board: Board | null;
   knights: { p1: Cell; p2: Cell } | null;
   visited: { p1: Cell[]; p2: Cell[] } | null;
+  status: "playing" | "won";
+  result: { perfect: boolean; meetCell: Cell } | null;
 }
 
 // ---- client → server -------------------------------------------------------
@@ -82,7 +90,8 @@ export type ErrorCode =
   | "room_full"
   | "bad_token"
   | "bad_message"
-  | "illegal_move";
+  | "illegal_move"
+  | "game_over";
 
 export type ServerMsg =
   // `you` and `token` are returned ONLY here — never in a broadcast.

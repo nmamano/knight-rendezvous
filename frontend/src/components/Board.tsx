@@ -40,8 +40,11 @@ export function Board({ board, knights, visited, onMove }: Props) {
   // Board frame is 5px each side; the playable field is n cells + (n-1) gaps.
   const maxBoardPx = n * DESK_CELL + (n - 1) * GAP + 2 * PAD + 10;
 
-  // Which player owns each visited cell, for the themed tint. p1 (amber) and p2
-  // (violet) trails are disjoint by the no-reuse rule, so a single map is safe.
+  // Which player owns each visited cell, for the themed tint. The two trails are
+  // disjoint during play, with ONE exception: the rendezvous hop (C3) lands a
+  // knight on the other's square, so after a win that single shared cell appears
+  // in both trails. p2 is written last, so it wins the tint there — a harmless
+  // cosmetic overwrite on that one meeting cell.
   const trailOwner = new Map<number, PlayerId>();
   for (const v of visited.p1) trailOwner.set(cellKey(v.r, v.c), "p1");
   for (const v of visited.p2) trailOwner.set(cellKey(v.r, v.c), "p2");
