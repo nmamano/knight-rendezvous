@@ -796,3 +796,302 @@ describe("C2 movement + sync (real WS)", () => {
     p2.close();
   });
 });
+
+// Wait until `c` has received at least `n` total `state` messages, returning the
+// latest active state. Used for retry/undo NO-OPs, which STILL broadcast (uniform
+// "ok ⇒ broadcast") but leave `visited` unchanged, so a content predicate can't
+// detect them — we count broadcasts instead.
+async function awaitStateCount(c: Client, n: number) {
+  await c.waitFor("state", () => c.states().length >= n);
+  return activeState(c.last("state")!);
+}
+
+// Converge the two knights onto adjacent witness-path cells: drive p1 forward to
+// path[i] and p2 back to path[i+1] (consecutive path cells are knight moves, so
+// the two are a knight-move apart). Returns the path, the meet index i, and the
+// post-convergence state. p1's trail = path[0..i], p2's trail = path[i+1..last].
+async function convergeMidpoint(p1: Client, p2: Client, init: ReturnType<typeof activeState>) {
+  const board = init.board;
+  const path = reconstructPath(board, init.knights.p1, init.knights.p2);
+  const last = path.length - 1;
+  const i = Math.floor(path.length / 2);
+  for (let j = 1; j <= i; j++) {
+    p1.send({ t: "move", cell: path[j] });
+    await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, path[j]));
+  }
+  for (let j = last - 1; j >= i + 1; j--) {
+    p2.send({ t: "move", cell: path[j] });
+    await awaitMoveApplied(p1, p2, (v) => inCells(v.p2, path[j]));
+  }
+  return { path, i, pre: activeState(p1.last("state")!) };
+}
+
+describe("C4 retry + undo (real WS)", () => {
+  test("retry resets ONLY the requester's trail to its start; the OTHER is byte-identical", async () => {
+    const { p1, p2, init } = await activeGame();
+    // p1 hops twice along the witness; p2 hops once. Then p1 retries.
+    const path = reconstructPath(init.board, init.knights.p1, init.knights.p2);
+    const last = path.length - 1;
+    for (let j = 1; j <= 2; j++) {
+      p1.send({ t: "move", cell: path[j] });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, path[j]));
+    }
+    p2.send({ t: "move", cell: path[last - 1] });
+    const before = await awaitMoveApplied(p1, p2, (v) => inCells(v.p2, path[last - 1]));
+    const p2VisitedBefore = JSON.stringify(before.visited.p2);
+    const p2KnightBefore = JSON.stringify(before.knights.p2);
+
+    p1.send({ t: "retry" });
+    // Require p2's hop to be present so we don't match the INITIAL state (where
+    // p1.length is also 1 but p2 had not yet moved).
+    const after = await awaitMoveApplied(
+      p1,
+      p2,
+      (v) => v.p1.length === 1 && inCells(v.p2, path[last - 1]),
+    );
+
+    // Requester collapsed to [start]; knight back on start.
+    expect(after.visited.p1).toEqual([init.knights.p1]);
+    expect(after.knights.p1).toEqual(init.knights.p1);
+    // The OTHER player is byte-identical before/after (deep-equal).
+    expect(JSON.stringify(after.visited.p2)).toBe(p2VisitedBefore);
+    expect(JSON.stringify(after.knights.p2)).toBe(p2KnightBefore);
+    // Both clients agree.
+    expect(JSON.stringify(activeState(p2.last("state")!))).toBe(JSON.stringify(after));
+    p1.close();
+    p2.close();
+  });
+
+  test("undo pops ONLY the requester's last hop; the OTHER is byte-identical", async () => {
+    const { p1, p2, init } = await activeGame();
+    const path = reconstructPath(init.board, init.knights.p1, init.knights.p2);
+    const last = path.length - 1;
+    for (let j = 1; j <= 2; j++) {
+      p1.send({ t: "move", cell: path[j] });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, path[j]));
+    }
+    p2.send({ t: "move", cell: path[last - 1] });
+    const before = await awaitMoveApplied(p1, p2, (v) => inCells(v.p2, path[last - 1]));
+    const p2VisitedBefore = JSON.stringify(before.visited.p2);
+    const p2KnightBefore = JSON.stringify(before.knights.p2);
+
+    p1.send({ t: "undo" });
+    // p1's trail goes 3 → 2; path[2] is freed, path[1] stays. CONTENT-unique
+    // predicate (NOT a length): it must also REQUIRE p2's hop so we don't match the
+    // earlier 2-cell p1 state right after p1's first hop, when p2 had not yet moved.
+    const after = await awaitMoveApplied(
+      p1,
+      p2,
+      (v) => inCells(v.p1, path[1]) && !inCells(v.p1, path[2]) && inCells(v.p2, path[last - 1]),
+    );
+
+    expect(after.visited.p1).toEqual([init.knights.p1, path[1]]);
+    expect(after.knights.p1).toEqual(path[1]);
+    // The OTHER player byte-identical before/after.
+    expect(JSON.stringify(after.visited.p2)).toBe(p2VisitedBefore);
+    expect(JSON.stringify(after.knights.p2)).toBe(p2KnightBefore);
+    p1.close();
+    p2.close();
+  });
+
+  test("undo at the start (length <= 1) is a benign no-op: ok, no state change", async () => {
+    const { p1, p2, init } = await activeGame();
+    const beforeCount = p1.states().length;
+    const before = activeState(p1.last("state")!);
+
+    p1.send({ t: "undo" });
+    // Uniform "ok ⇒ broadcast": a no-op STILL broadcasts. Wait for that broadcast,
+    // then assert content is unchanged.
+    const after = await awaitStateCount(p1, beforeCount + 1);
+    expect(JSON.stringify(after)).toBe(JSON.stringify(before));
+    expect(after.visited.p1).toEqual([init.knights.p1]);
+    expect(after.knights.p1).toEqual(init.knights.p1);
+    // No error came back.
+    expect(p1.last("error")).toBeNull();
+    p1.close();
+    p2.close();
+  });
+
+  test("retry when already at the start is idempotent: ok, no change", async () => {
+    const { p1, p2, init } = await activeGame();
+    const beforeCount = p1.states().length;
+    const before = activeState(p1.last("state")!);
+
+    p1.send({ t: "retry" });
+    const after = await awaitStateCount(p1, beforeCount + 1);
+    expect(JSON.stringify(after)).toBe(JSON.stringify(before));
+    expect(after.visited.p1).toEqual([init.knights.p1]);
+    expect(after.knights.p1).toEqual(init.knights.p1);
+    expect(p1.last("error")).toBeNull();
+    p1.close();
+    p2.close();
+  });
+
+  test("invariant knights.pX === visited.pX[last] holds after undo AND after retry", async () => {
+    const { p1, p2, init } = await activeGame();
+    const path = reconstructPath(init.board, init.knights.p1, init.knights.p2);
+    for (let j = 1; j <= 3; j++) {
+      p1.send({ t: "move", cell: path[j] });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, path[j]));
+    }
+
+    // CONTENT-unique predicate (length 3 alone would match the earlier 3-cell
+    // state after p1's 2nd hop): undo frees path[3] and leaves path[2] as current.
+    p1.send({ t: "undo" });
+    const afterUndo = await awaitMoveApplied(
+      p1,
+      p2,
+      (v) => inCells(v.p1, path[2]) && !inCells(v.p1, path[3]),
+    );
+    for (const s of [afterUndo, activeState(p2.last("state")!)]) {
+      expect(s.visited.p1[s.visited.p1.length - 1]).toEqual(s.knights.p1);
+      expect(s.visited.p2[s.visited.p2.length - 1]).toEqual(s.knights.p2);
+    }
+
+    // After retry p1's trail collapses to [start]; path[1] is no longer present.
+    p1.send({ t: "retry" });
+    const afterRetry = await awaitMoveApplied(
+      p1,
+      p2,
+      (v) => v.p1.length === 1 && !inCells(v.p1, path[1]),
+    );
+    for (const s of [afterRetry, activeState(p2.last("state")!)]) {
+      expect(s.visited.p1[s.visited.p1.length - 1]).toEqual(s.knights.p1);
+      expect(s.visited.p2[s.visited.p2.length - 1]).toEqual(s.knights.p2);
+    }
+    p1.close();
+    p2.close();
+  });
+
+  test("both retry and undo are rejected with game_over after a win (state unchanged)", async () => {
+    const { p1, p2, init } = await activeGame();
+    const board = init.board;
+    // Drive p1 onto stationary p2 → rendezvous (clone of the post-win pattern).
+    const target = init.knights.p2;
+    const path = bfsToAdjacent(board, init.knights.p1, target)!;
+    for (const step of path) {
+      p1.send({ t: "move", cell: step });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, step));
+    }
+    p1.send({ t: "move", cell: target });
+    const won = activeState(await p1.waitFor("state", (m) => m.state.status === "won"));
+    await p2.waitFor("state", (m) => m.state.status === "won");
+    const beforeJson = JSON.stringify(won);
+
+    // Each of retry/undo, from each player, must be rejected as game_over.
+    p1.send({ t: "retry" });
+    expect((await p1.waitFor("error", (m) => m.code === "game_over")).code).toBe("game_over");
+    p1.send({ t: "undo" });
+    expect((await p1.waitFor("error", (m) => m.code === "game_over")).code).toBe("game_over");
+    p2.send({ t: "retry" });
+    expect((await p2.waitFor("error", (m) => m.code === "game_over")).code).toBe("game_over");
+    p2.send({ t: "undo" });
+    expect((await p2.waitFor("error", (m) => m.code === "game_over")).code).toBe("game_over");
+
+    // State is unchanged: the last broadcast is still the winning one.
+    expect(JSON.stringify(activeState(p1.last("state")!))).toBe(beforeJson);
+    p1.close();
+    p2.close();
+  });
+
+  test("vacated-cell re-legality: p1 undoes off cell X, then p2 legally hops onto X", async () => {
+    const { p1, p2, init } = await activeGame();
+    const board = init.board;
+    // Converge: p1 on path[i], p2 on path[i+1] (a knight-move apart). X = path[i].
+    const { path, i, pre } = await convergeMidpoint(p1, p2, init);
+    const X = path[i];
+    expect(sameCell(pre.knights.p1, X)).toBe(true);
+    expect(inCells(pre.visited.p1, X)).toBe(true);
+    // p2 is a knight-move from X, but X is currently in p1's trail → blocked.
+    expect(knightMoves(pre.knights.p2, board.n).some((m) => sameCell(m, X))).toBe(true);
+
+    // p1 undoes off X → X is freed (back to path[i-1]). CONTENT-unique predicate:
+    // path[i-1] present, X absent, AND p2 already converged to path[i+1] — without
+    // the p2 clause this also matches the forward-walk state where p1 first reached
+    // path[i-1] (X not yet visited, and p2 had not yet moved).
+    p1.send({ t: "undo" });
+    const afterUndo = await awaitMoveApplied(
+      p1,
+      p2,
+      (v) => inCells(v.p1, path[i - 1]) && !inCells(v.p1, X) && inCells(v.p2, path[i + 1]),
+    );
+    expect(inCells(afterUndo.visited.p1, X)).toBe(false);
+    expect(afterUndo.knights.p1).toEqual(path[i - 1]);
+
+    // p2 now legally hops onto X (proves the no-reuse union recomputes from live
+    // trails — the freed cell is re-enterable).
+    p2.send({ t: "move", cell: X });
+    const afterHop = await awaitMoveApplied(p1, p2, (v) => inCells(v.p2, X));
+    expect(inCells(afterHop.visited.p2, X)).toBe(true);
+    expect(afterHop.knights.p2).toEqual(X);
+    // No error fired for p2.
+    expect(p2.last("error")).toBeNull();
+    p1.close();
+    p2.close();
+  });
+
+  test("concurrency: p1 retry frees a cell an in-flight p2 move targets → that move now succeeds where it would have failed", async () => {
+    const { p1, p2, init } = await activeGame();
+    const board = init.board;
+    // Converge so p2 (on path[i+1]) is a knight-move from X = path[i]. After the
+    // converge, X is p1's CURRENT cell. The witness-path geometry only ever puts a
+    // p1-OWNED cell adjacent to p2 at p1's current square, so X = path[i] is the
+    // cell we can force p2 to target. WITHOUT the retry, p2's hop onto X would be
+    // the rendezvous WIN (it ends the game); we want it as an ORDINARY move.
+    const { path, i, pre } = await convergeMidpoint(p1, p2, init);
+    const X = path[i];
+    expect(sameCell(pre.knights.p1, X)).toBe(true); // X is p1's current cell now
+    expect(knightMoves(pre.knights.p2, board.n).some((m) => sameCell(m, X))).toBe(true);
+    expect(pre.status).toBe("playing");
+
+    // Fire p1 RETRY then p2's hop onto X UN-AWAITED. The single-threaded room
+    // serializes retry FIRST: p1 abandons X (resets to its start), so X is now a
+    // free, unowned cell — and p2's hop lands as an ORDINARY move, NOT a
+    // rendezvous (no win). Without the retry ordering, the SAME hop would have
+    // ended the game on the partner's square; here it is a plain trail extension.
+    p1.send({ t: "retry" });
+    p2.send({ t: "move", cell: X });
+    const after = await awaitMoveApplied(p1, p2, (v) => inCells(v.p2, X));
+    expect(after.knights.p2).toEqual(X);
+    expect(inCells(after.visited.p2, X)).toBe(true);
+    // The hop did NOT win — retry-first turned the rendezvous into an ordinary move.
+    expect(after.status).toBe("playing");
+    expect(after.result).toBeNull();
+    // p1 was reset to its start by the retry (and is no longer on X).
+    expect(after.visited.p1).toEqual([init.knights.p1]);
+    expect(sameCell(after.knights.p1, X)).toBe(false);
+    p1.close();
+    p2.close();
+  });
+
+  test("concurrency: p2 moves, then p1 undoes — p2's trail is untouched by p1's undo", async () => {
+    const { p1, p2, init } = await activeGame();
+    const path = reconstructPath(init.board, init.knights.p1, init.knights.p2);
+    const last = path.length - 1;
+    // p1 takes two hops so it has something to undo.
+    for (let j = 1; j <= 2; j++) {
+      p1.send({ t: "move", cell: path[j] });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, path[j]));
+    }
+    // p2 moves.
+    p2.send({ t: "move", cell: path[last - 1] });
+    const afterP2 = await awaitMoveApplied(p1, p2, (v) => inCells(v.p2, path[last - 1]));
+    const p2VisitedAfterMove = JSON.stringify(afterP2.visited.p2);
+    const p2KnightAfterMove = JSON.stringify(afterP2.knights.p2);
+
+    // p1 undoes — p2's trail/knight must be byte-identical. CONTENT-unique
+    // predicate (path[1] present, path[2] freed, AND p2's hop present) so we don't
+    // match the earlier 2-cell p1 state from right after p1's first hop (before p2
+    // moved).
+    p1.send({ t: "undo" });
+    const afterUndo = await awaitMoveApplied(
+      p1,
+      p2,
+      (v) => inCells(v.p1, path[1]) && !inCells(v.p1, path[2]) && inCells(v.p2, path[last - 1]),
+    );
+    expect(JSON.stringify(afterUndo.visited.p2)).toBe(p2VisitedAfterMove);
+    expect(JSON.stringify(afterUndo.knights.p2)).toBe(p2KnightAfterMove);
+    p1.close();
+    p2.close();
+  });
+});

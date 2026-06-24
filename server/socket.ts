@@ -163,6 +163,21 @@ export function registerSocket(app: Hono, store: RoomStore) {
             b.room.move(b.pid, cell, conn);
             return;
           }
+          case "retry": {
+            // No payload validation: retry carries no fields beyond `t`. The
+            // player is inferred from the bound slot (same as move).
+            const b = active();
+            if (!b) return;
+            b.room.retry(b.pid, conn);
+            return;
+          }
+          case "undo": {
+            // No payload validation: undo carries no fields beyond `t`.
+            const b = active();
+            if (!b) return;
+            b.room.undo(b.pid, conn);
+            return;
+          }
           case "leave": {
             const b = active();
             if (b) b.room.leave(b.pid, conn);

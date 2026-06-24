@@ -140,7 +140,7 @@ DNS / custom subdomain changes      # runs as Nil
   either, belongs to that player) + broadcasts; both clients see both trails.
 - [x] **C3 — Win/meet detection.** Shared-engine rendezvous logic (same-square per
   locked decision 1); soft vs perfect; win panel on both clients.
-- [ ] **C4 — Retry + Undo (per-player).** Per locked decision 6.
+- [x] **C4 — Retry + Undo (per-player).** Per locked decision 6.
 - [ ] **C5 — View solution (both) + Hint (per-player).** Per locked decision 7.
 - [ ] **C6 — Polish + cross-links + meta.** Name applied, OG/favicon, "new random
   puzzle" button, opponent-left/reconnect UX, mobile, link to/from knights-puzzle.

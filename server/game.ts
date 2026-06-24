@@ -179,6 +179,57 @@ export class Game {
   }
 
   /**
+   * Reset ONLY `pid`'s OWN knight to its start, freeing its entire trail (locked
+   * decision 6). NEVER touches the other player's visited/knight. Truncates
+   * visited[pid] to just its first cell (p1 = puzzle.start, p2 = puzzle.end) and
+   * snaps knights[pid] back to it, preserving the invariant
+   * knights.pX === visited.pX[last]. Idempotent when already at the start.
+   *
+   * Freed cells correctly become legal again for EITHER knight — the no-reuse
+   * union (move check (c)) recomputes from the LIVE trails, so there is nothing
+   * else to update here.
+   */
+  retry(pid: PlayerId): MoveResult {
+    // Win-blocked: retry is an in-play affordance only (locked decision 6). Since
+    // it can only run while playing, status/result are already "playing"/null —
+    // intentionally NOT reset here (no dead status="playing"/result=null writes).
+    if (this.status === "won") {
+      return gameOver("The game is over.");
+    }
+    const start = this.visited[pid][0];
+    this.visited[pid] = [start];
+    // CLONE the start cell so knights[pid] is not an alias of visited[pid][0].
+    this.knights[pid] = { r: start.r, c: start.c };
+    return { ok: true };
+  }
+
+  /**
+   * Pop ONLY `pid`'s OWN last move (locked decision 6). NEVER touches the other
+   * player's visited/knight. If the knight is already at its start
+   * (visited[pid].length <= 1) this is a benign no-op (ok, NO mutation). Else it
+   * pops the last visited cell and snaps knights[pid] to the new last cell,
+   * preserving the invariant knights.pX === visited.pX[last].
+   *
+   * The vacated cell becomes legal again for EITHER knight via the same live-trail
+   * no-reuse recompute as retry — nothing else to update.
+   */
+  undo(pid: PlayerId): MoveResult {
+    // Win-blocked, same reasoning as retry: status/result are already
+    // "playing"/null when this runs — intentionally NOT reset here.
+    if (this.status === "won") {
+      return gameOver("The game is over.");
+    }
+    if (this.visited[pid].length <= 1) {
+      return { ok: true }; // already at start — benign no-op, no mutation
+    }
+    this.visited[pid].pop();
+    const last = this.visited[pid][this.visited[pid].length - 1];
+    // CLONE the new last cell so knights[pid] is not an alias of the trail entry.
+    this.knights[pid] = { r: last.r, c: last.c };
+    return { ok: true };
+  }
+
+  /**
    * Project the public Board. Carries the full (n, steps, seed) triple so any
    * client/test reproduces the puzzle deterministically, plus the derived
    * available/start/end. Arrays are CLONED so neither tests nor server internals

@@ -209,6 +209,20 @@ export function App() {
     netRef.current?.send({ t: "move", cell });
   }, []);
 
+  // Per-player Retry/Undo (locked decision 6 — they only ever affect YOUR own
+  // knight; the server is the authority). No optimistic UI: we render only on the
+  // resulting server `state`. The button-disable below is UX; the server guards
+  // (win-blocked / boundary no-op) are the actual rules.
+  const retry = useCallback(() => {
+    setError(null);
+    netRef.current?.send({ t: "retry" });
+  }, []);
+
+  const undo = useCallback(() => {
+    setError(null);
+    netRef.current?.send({ t: "undo" });
+  }, []);
+
   const exit = useCallback(() => {
     netRef.current?.send({ t: "leave" });
     clearSession();
@@ -238,6 +252,12 @@ export function App() {
     const me = snapshot.players.find((p) => p.id === you);
     const opp = snapshot.players.find((p) => p.id !== you);
     const won = snapshot.status === "won";
+    // Your own trail length drives the button-disable UX (server is the authority).
+    // length<=1 means you are at your start: nothing to undo, nothing to retry.
+    const myTrailLen = you ? snapshot.visited[you].length : 0;
+    const atStart = myTrailLen <= 1;
+    const undoDisabled = won || atStart;
+    const retryDisabled = won || atStart;
     view = (
       <main className="mx-auto flex min-h-screen w-full max-w-2xl flex-col items-center justify-center gap-6 px-4 py-10 text-center">
         <h1 className="text-3xl font-extrabold tracking-tight" style={{ color: "#3a3357" }}>
@@ -255,6 +275,31 @@ export function App() {
           // guard. A no-op onMove means clicks are ignored client-side too.
           onMove={won ? () => {} : move}
         />
+        {/* Per-player controls (locked decision 6). Retry resets ONLY your knight
+            to its start; Undo pops ONLY your last move. Disabled when the game is
+            won or you are already at your start — but those are UX hints only; the
+            server guards are the authority (no optimistic UI). The look ports
+            knights-puzzle's pill/shadow/handwritten controls into KR's Tailwind. */}
+        <div className="flex items-center justify-center gap-3">
+          <button
+            type="button"
+            onClick={retry}
+            disabled={retryDisabled}
+            className="rounded-full border-2 border-[#c9bdf4] bg-white px-5 py-2 text-lg font-bold text-[#4a4366] shadow-[0_4px_0_0_#d6d8e6] transition hover:bg-[#f3effd] active:translate-y-0.5 active:shadow-[0_2px_0_0_#d6d8e6] disabled:cursor-not-allowed disabled:opacity-50 disabled:active:translate-y-0 disabled:active:shadow-[0_4px_0_0_#d6d8e6]"
+            style={{ fontFamily: "var(--display)" }}
+          >
+            Retry
+          </button>
+          <button
+            type="button"
+            onClick={undo}
+            disabled={undoDisabled}
+            className="rounded-full border-2 border-[#c9bdf4] bg-white px-5 py-2 text-lg font-bold text-[#4a4366] shadow-[0_4px_0_0_#d6d8e6] transition hover:bg-[#f3effd] active:translate-y-0.5 active:shadow-[0_2px_0_0_#d6d8e6] disabled:cursor-not-allowed disabled:opacity-50 disabled:active:translate-y-0 disabled:active:shadow-[0_4px_0_0_#d6d8e6]"
+            style={{ fontFamily: "var(--display)" }}
+          >
+            Undo
+          </button>
+        </div>
         {won && snapshot.result ? (
           <WinPanel perfect={snapshot.result.perfect} />
         ) : (

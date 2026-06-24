@@ -81,6 +81,13 @@ export type ClientMsg =
   // Hop the SENDER's own knight to `cell`. The player is inferred server-side
   // from the bound slot — it is deliberately NOT carried on the wire.
   | { t: "move"; cell: Cell }
+  // Reset ONLY the sender's own knight to its start, freeing its whole trail
+  // (locked decision 6). Like move, the player is inferred from the bound slot
+  // and there are no payload fields. Forbidden once the game is won.
+  | { t: "retry" }
+  // Pop ONLY the sender's own last move (locked decision 6). No payload fields;
+  // a benign no-op when the knight is already at its start. Forbidden once won.
+  | { t: "undo" }
   | { t: "leave" };
 
 // ---- server → client -------------------------------------------------------

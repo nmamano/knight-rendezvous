@@ -14,6 +14,6 @@ square**. Move freely, no turns.
 Built via a gated slice loop — see [`plans/knight-rendezvous-loop.md`](plans/knight-rendezvous-loop.md).
 
 ## Status
-C3 done — the game is winnable: when one knight hops onto the other knight's
-square the two meet (rendezvous), both clients show a win panel ("Perfect!" when
-every square is covered), and further moves are blocked. Next: C4 (retry + undo).
+C4 done — each player has Retry (reset only your knight to its start) and Undo
+(take back only your last move); neither touches the other knight, and both are
+blocked once the game is won. Next: C5 (view solution to both + per-player hint).

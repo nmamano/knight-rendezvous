@@ -1,4 +1,4 @@
-// Dual-client real-browser smoke gate for Knight Rendezvous (C3).
+// Dual-client real-browser smoke gate for Knight Rendezvous (C3 + C4).
 //
 // Boots ONE Bun server (server/index.ts) on reserved port 4318 serving the built
 // frontend/dist, then drives TWO headless system-Chrome contexts: context A
@@ -16,6 +16,12 @@
 // target the partner). We then assert (via the server-authoritative window.__KR__
 // on BOTH contexts) status==="won" and result.perfect===true (full coverage), and
 // that the post-win state is byte-identical across the two clients.
+//
+// C4: BEFORE any winning hop, p1 hops one cell then UNDOES it (its trail shrinks
+// by one and its knight reverts), and separately hops then RETRIES (its trail
+// collapses to [start]) — driving the real Undo/Retry buttons. After EVERY C4 op
+// the OTHER player (p2) must be byte-identical on BOTH contexts (locked decision
+// 6: per-player only). All C4 judging is via window.__KR__ on both contexts.
 //
 // The rendered DOM (the cell grid + two knight overlays) is confirmed only as a
 // health check. pageerror is strict; only expected WS/resource console noise is
@@ -281,6 +287,75 @@ try {
     }
   }
 
+  // ---- C4: exercise per-player UNDO + RETRY BEFORE any winning hop -----------
+  // Drive the real buttons (not the Net internals) so the UI wiring is covered;
+  // judge ONLY via the server-authoritative window.__KR__ on BOTH contexts. Both
+  // ops must affect ONLY the acting player's knight/trail (locked decision 6).
+  //
+  // Snapshot p2 (the OTHER player) up front; after every C4 op below it must be
+  // byte-identical on BOTH contexts. We run these while p1 is still at its start
+  // and p2 has not moved, so the perfect-win walk further down is undisturbed.
+  const p2BeforeC4 = JSON.stringify(
+    await pageA.evaluate(() => ({
+      visited: window.__KR__.visited.p2,
+      knight: window.__KR__.knights.p2,
+    })),
+  );
+  const assertP2Untouched = async (where) => {
+    for (const [page, label] of [
+      [pageA, "A"],
+      [pageB, "B"],
+    ]) {
+      const now = JSON.stringify(
+        await page.evaluate(() => ({
+          visited: window.__KR__.visited.p2,
+          knight: window.__KR__.knights.p2,
+        })),
+      );
+      if (now !== p2BeforeC4) {
+        throw new Error(`[${label}] p2 (the OTHER player) changed during ${where}: ${now}`);
+      }
+    }
+  };
+  // Wait for BOTH contexts to observe p1's trail length === len and its knight on
+  // `cell` (the server is the oracle, read on each context).
+  const awaitP1 = async (len, cell) => {
+    for (const page of [pageA, pageB]) {
+      await page.waitForFunction(
+        ([l, t]) => {
+          const s = window.__KR__;
+          if (!s || !s.visited || !s.knights) return false;
+          const v = s.visited.p1;
+          const k = s.knights.p1;
+          return v.length === l && k.r === t.r && k.c === t.c;
+        },
+        [len, cell],
+        { timeout: 15000 },
+      );
+    }
+  };
+
+  // (1) p1 HOPS one cell, then UNDOES it. p1's trail must shrink by one and its
+  // knight revert to start; p2 untouched on BOTH contexts.
+  await hopAndConverge(pageA, "p1", path[1]); // p1 trail: [start, path[1]]
+  await awaitP1(2, path[1]);
+  await assertP2Untouched("p1 hop (pre-undo)");
+  await pageA.getByRole("button", { name: "Undo" }).click();
+  await awaitP1(1, boardA.start); // back to [start]
+  await assertP2Untouched("p1 undo");
+
+  // (2) p1 HOPS again, then RETRIES. p1's trail must collapse to [start]; p2
+  // untouched on BOTH contexts. (Retry from a single-hop trail is the same shape
+  // as retry from many hops — both collapse to [start].)
+  await hopAndConverge(pageA, "p1", path[1]); // p1 trail: [start, path[1]]
+  await awaitP1(2, path[1]);
+  await pageA.getByRole("button", { name: "Retry" }).click();
+  await awaitP1(1, boardA.start); // collapsed to [start]
+  await assertP2Untouched("p1 retry");
+
+  // p1 is back on its start and p2 never moved → the perfect-win choreography
+  // below proceeds exactly as in C3.
+
   // p1 walks forward path[1]..path[meetK-1].
   for (let j = 1; j <= meetK - 1; j++) {
     await hopAndConverge(pageA, "p1", path[j]);
@@ -398,6 +473,9 @@ try {
         availableCells,
         identicalBoards: true,
         identicalWinState: true,
+        c4UndoVerified: true,
+        c4RetryVerified: true,
+        c4OtherPlayerUntouched: true,
         chrome: browser.version(),
       },
       null,
