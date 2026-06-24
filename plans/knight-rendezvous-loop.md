@@ -550,13 +550,63 @@ round-trip-chess 111/111 (incl. real-WS integration).
 > Leave Nil a completion summary + the parked-for-Nil queue; do NOT schedule another
 > wakeup.
 
-## SLICE-N PICKUP — authored when N-1 commits
-> Author each next handoff only AFTER the previous one commits, folding in a
-> "what slice N-1 taught" block at the top. That is where workflow knowledge
-> compounds.
+## SLICE-7 PICKUP (C7 — deploy) — HUMAN-GATED, runs as Nil. Loop has STOPPED here.
+- **Baseline commit:** `678626e` (C6 / build phase complete).
+- **This slice is OUTSIDE the autonomous loop.** Every credentialed step uses Nil's
+  GitHub/fly/DNS credentials → Nil must trigger/approve each. The loop stopped after
+  C6 per the plan; do NOT resume it for C7.
+- **What the build phase produced:** a complete, gates-green app at `678626e` — Bun
+  monorepo (`shared/ server/ frontend/`), Hono WebSocket server (in-memory,
+  single-machine), 58 unit/integration tests + dual-client Playwright smoke all
+  green, branding + favicon/og.png in place. `og:url`/absolute `og:image` are
+  deliberately deferred (TODO at `frontend/index.html`, line ~16).
+- **Deploy shape = fly.io single machine** (locked #9), like round-trip-chess.
+  **flyctl is NOT installed on this box** (Phase-2 finding).
+- **Steps (each human-gated):**
+  1. **Deploy config (no creds — can be a normal reviewed commit on Nil's go-ahead):**
+     add `Dockerfile` (multi-stage Bun build → serve `frontend/dist` + server),
+     `.dockerignore`, `fly.toml` (app `knight-rendezvous`, `min_machines_running=1`,
+     `internal_port=3000`, region, 256mb), `.github/workflows/fly-deploy.yml` (deploy
+     on push to `main`, `FLY_API_TOKEN` secret). Mirror round-trip-chess.
+  2. **Create GitHub repo** (`gh repo create`) — Nil's creds → Nil approves.
+  3. **Deploy** via GitHub Action + `FLY_API_TOKEN` secret, OR install flyctl and
+     `fly launch/deploy` — Nil's fly creds.
+  4. **Resolve G2 (subdomain):** `knight-rendezvous.fly.dev` only, or a custom
+     `<something>.nilmamano.com` CNAME → fly. Then fill the `og:url` + absolute
+     `og:image` TODO in `index.html`.
+  5. **KP→KR back-link:** edit the live `knights-puzzle` repo (rail #2 lifts ONLY at
+     C7) to link to the new game; reviewed commit + redeploy KP (Vercel). Runs as Nil.
+- **parked-for-Nil to resolve at C7:** G2 subdomain choice; deploy mechanism
+  (GitHub Action + `FLY_API_TOKEN` vs local flyctl).
 
 ---
 
-## Completion note
-_(filled in when the loop finishes: slice → commit → what landed, plus the
-parked-for-Nil queue.)_
+## Completion note — build phase done (C1–C6), loop stopped before human-gated C7
+
+Baseline (standing orders): `b3f5950`. All slices below were each plan-gated +
+diff-gated by spawned subagents, gates verified by the loop driver, single focused
+commit, checkbox ticked in-commit.
+
+| Slice | Commit | What landed |
+|---|---|---|
+| C1 | `054639f` | Pair via 4-char code → both render the identical server-generated board; two distinct-colored knights at start/end. Bun monorepo + Hono WS scaffold; engine ported pure into `shared/`. |
+| C2 | `b160c8f` | Independent (not turn-based) live movement; server validates + broadcasts; both trails sync; first-valid-wins. |
+| C3 | `2fbb08e` | Rendezvous = one knight hops onto the other's square; soft win + "perfect" (full cover); win panel both clients; post-win moves blocked. |
+| C4 | `db9dfa8` | Per-player Retry + Undo (affect only the requester's knight); win-blocked. |
+| C5 | `01bbb4b` | View-solution (server-driven frames, both clients, restores prior state, never marks solved) + per-player actor-only Hint. |
+| C6 | `678626e` | "New puzzle" room-wide reset; branding + favicon/og.png; opponent-left/reconnect UX; responsive; outbound link to Knight's Puzzle. |
+
+Gates at completion: `bun run ci` = 58 tests + format/lint/typecheck/build green;
+`bun run smoke` = dual-client Chrome, byte-identical boards, full rendezvous,
+retry/undo, view-solution restore, hint actor-only, newPuzzle reset — all green.
+The witness `path` never appears on the wire (guarded in tests + smoke).
+
+**Remaining: C7 (deploy) — HUMAN-GATED, runs as Nil.** See SLICE-7 PICKUP.
+
+### parked-for-Nil queue
+- **G2 — final subdomain:** `knight-rendezvous.fly.dev` only, or a custom
+  `<something>.nilmamano.com` CNAME → fly?
+- **C7 deploy mechanism:** GitHub Action + `FLY_API_TOKEN` secret (like chess), or
+  install flyctl locally? (flyctl NOT installed on this box.)
+- **C7 credentialed steps:** create GitHub repo, `fly deploy`, DNS, and the KP→KR
+  back-link (edits the live knights-puzzle repo) — all await Nil's go-ahead.
