@@ -352,6 +352,57 @@ round-trip-chess 111/111 (incl. real-WS integration).
   (invert the dedicated test); `scripts/smoke.mjs` (drive a rendezvous);
   `frontend/src/{App.tsx,components/Board.tsx}` (win panel + input lock).
 
+## SLICE-4 PICKUP (C4 — per-player retry + undo) — authored after C3
+- **Baseline commit:** `2fbb08e` (C3).
+- **What C3 taught (fold in):**
+  - `Game.move` check (0) hard-blocks moves once `status==="won"`. Retry/undo are
+    SEPARATE ops — each must decide post-win behavior. **Recommendation: forbid both
+    when `status==="won"`** (game is over; locked #6 frames them as in-play
+    affordances). This sidesteps `result`-staleness entirely (result is set only at
+    the win; if you never mutate the board post-win, it can't go stale).
+  - The rendezvous appends the partner's cell to the mover's `visited` and sets both
+    knights there → that ONE cell is in both trails post-win, and
+    `knights.p1===knights.p2`. Because retry/undo are win-blocked, C4 never has to
+    undo the winning hop. **During PLAY the two trails are disjoint** (no-reuse), so
+    freeing your own cells is always safe.
+  - **Invariant `knights.pX===visited.pX[last]` must be preserved**: undo = pop last
+    `visited` entry, set knight to the new last; retry = truncate `visited[pid]` to
+    `[visited[pid][0]]` (its start: p1=puzzle.start, p2=puzzle.end) and set knight to
+    that start. **Neither touches the other player's trail/knight** (locked #6).
+  - Freeing your own cells (undo/retry) correctly makes them legal again for EITHER
+    knight — no special handling; that's the intended no-reuse semantics.
+  - `colorOf` still triplicated (parked) — optional opportunistic collapse only if low-risk.
+- **Goal:** per-player **Retry** (reset ONLY the requesting player's knight to its
+  start, free its trail) and **Undo** (pop ONLY the requesting player's last move).
+  Neither touches the other knight (locked #6). Both forbidden when `status==="won"`.
+- **Load-bearing mechanics / traps:**
+  - Add `ClientMsg` `{t:"retry"}` and `{t:"undo"}` (player inferred from slot).
+  - `Game.retry(pid)`: if won → reject (`game_over`). Else truncate `visited[pid]` to
+    its first element, set `knights[pid]` to it, broadcast. Idempotent if already at start.
+  - `Game.undo(pid)`: if won → reject. If `visited[pid].length<=1` → harmless no-op
+    (decide w/ diff-gate: silent ok vs error). Else pop last, set `knights[pid]` to
+    new last, broadcast.
+  - Route retry/undo through the same `Room`/`active()`/stale-socket/error-to-actor
+    plumbing as `move`. Single-threaded room → ordering is fine.
+  - Frontend: Retry + Undo buttons (knights-puzzle controls look), send the messages,
+    disabled when `won` or at boundary. NO optimistic UI — render on server `state`.
+- **Acceptance criteria:**
+  - Always-run gates green.
+  - Integration: retry resets ONLY requester's trail to its start (other knight
+    untouched); undo pops ONLY requester's last (other untouched); undo at start =
+    no-op; retry idempotent; both rejected (`game_over`) after a win; invariant
+    preserved; a vacated cell becomes legal again (re-enterable by either knight);
+    concurrency sanity (retry while the other player moves).
+  - Dual-client smoke: a context hops then undoes (knight + trail revert, other
+    client sees it); a retry resets one player's trail to start while the other's stays.
+- **Decide-with-(diff-gate)-subagent:** undo-at-boundary (silent no-op vs error);
+  client button-disable as primary UX with server as the guard; whether to collapse `colorOf`.
+- **Locked (don't relitigate):** decisions 1–9, esp. **#6** (retry/undo affect ONLY
+  the requesting player's knight). Do NOT implement view-solution/hint (C5) here.
+- **Resources:** `knights-puzzle/src/game.ts` `undoMove`/`resetGame` for shape;
+  `server/game.ts` (add `retry`/`undo`); `shared/protocol.ts` (add msgs);
+  `frontend` controls (knights-puzzle look); `tests/integration.test.ts`.
+
 ## SLICE-N PICKUP — authored when N-1 commits
 > Author each next handoff only AFTER the previous one commits, folding in a
 > "what slice N-1 taught" block at the top. That is where workflow knowledge
