@@ -45,6 +45,49 @@
   }
 }
 
+/* ---- Status line: Score + Difficulty (ported from knights-puzzle) --------- */
+
+.status {
+  font-family: var(--display);
+  font-size: 1.35rem;
+  font-weight: 400;
+  min-height: 1.4em;
+  margin: 0.25rem 0 1rem;
+  color: #4a4366;
+}
+.status-sep {
+  margin: 0 0.5rem;
+  opacity: 0.5;
+}
+.diff-score {
+  white-space: nowrap;
+}
+
+/* ---- Random-puzzle knobs (board size + path length sliders) ---------------
+   Ported from knights-puzzle/src/index.css: a clean, CENTERED, vertically
+   stacked block (not the cramped inline default-blue sliders). */
+.random-knobs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: min(92vw, 22rem);
+  margin: 0 auto 0.6rem;
+}
+.slider {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.9rem;
+  color: #5a5375;
+}
+.slider strong {
+  color: var(--ink);
+}
+.slider input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
 /* ---- Board (ported from knights-puzzle/src/index.css) --------------------- */
 
 .board-wrap {
@@ -110,19 +153,29 @@
   box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--violet-ink) 45%, transparent);
 }
 
-/* Fix 1 — legal-move highlight (ported from knights-puzzle's .open.legal): the
-   LOCAL player's legal next squares wear a pulsing lavender ring while playing.
-   This INCLUDES the rendezvous square (the partner's current cell when a
-   knight-move away), so the winning hop is always visible — even though that cell
-   may also carry the partner's knight overlay and a trail tint, the inset ring
-   still reads on top. Placed AFTER the trail-tint rules so its box-shadow wins on
-   that one shared cell (equal specificity → later rule). */
+/* Fix 1 + Fix 4 — legal-move highlight (ported from knights-puzzle's .open.legal):
+   the LOCAL player's legal next squares wear a pulsing ring while playing, in the
+   LOCAL player's OWN knight color (P1 = amber/gold, P2 = violet) so each player's
+   highlights read as theirs. This INCLUDES the rendezvous square (the partner's
+   current cell when a knight-move away), so the winning hop is always visible —
+   even though that cell may also carry the partner's knight overlay and a trail
+   tint, the inset ring still reads on top. Placed AFTER the trail-tint rules so its
+   box-shadow wins on that one shared cell (equal specificity → later rule). The
+   common bits (pulse + z-index) live on `.legal`; the per-color ring + glow live on
+   the `.legal-amber` / `.legal-violet` variants Board applies from `you`. */
 .cell.open.legal {
-  box-shadow:
-    inset 0 0 0 3px var(--accent),
-    inset 0 0 13px 2px rgba(108, 92, 255, 0.55);
   animation: pulse 1.1s ease-in-out infinite;
   z-index: 1;
+}
+.cell.open.legal.legal-amber {
+  box-shadow:
+    inset 0 0 0 3px var(--amber),
+    inset 0 0 13px 2px rgba(246, 166, 9, 0.6);
+}
+.cell.open.legal.legal-violet {
+  box-shadow:
+    inset 0 0 0 3px var(--violet),
+    inset 0 0 13px 2px rgba(139, 92, 246, 0.6);
 }
 @keyframes pulse {
   0%,

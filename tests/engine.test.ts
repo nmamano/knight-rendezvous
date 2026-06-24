@@ -13,6 +13,7 @@ import {
   isWin,
   type Cell,
 } from "../shared/engine";
+import { branchingProfile, difficultyScore } from "../shared/analysis";
 import { BOARD_N, BOARD_STEPS } from "../shared/config";
 
 function availStr(available: boolean[][]): string {
@@ -117,6 +118,29 @@ describe("legalMoves", () => {
     // The witness's second cell is a legal first move from the start.
     const second = p.path[1];
     expect(moves.some((m) => m.r === second.r && m.c === second.c)).toBe(true);
+  });
+});
+
+describe("difficulty (ported branchingProfile + difficultyScore)", () => {
+  test("branchingProfile has one entry per move and difficulty is a positive integer", () => {
+    const p = generatePuzzle(BOARD_N, BOARD_STEPS, 12345);
+    const profile = branchingProfile(p);
+    expect(profile.length).toBe(p.path.length - 1);
+    // Every count is at least 1 (the correct next cell is always among the options).
+    for (const count of profile) expect(count).toBeGreaterThanOrEqual(1);
+    const score = difficultyScore(p);
+    expect(Number.isInteger(score)).toBe(true);
+    expect(score).toBeGreaterThanOrEqual(1);
+    // The score is the product of branch-point counts (>= 2).
+    let expected = 1;
+    for (const c of profile) if (c >= 2) expected *= c;
+    expect(score).toBe(expected);
+  });
+
+  test("DETERMINISM: difficulty is a pure function of (n, steps, seed)", () => {
+    const a = generatePuzzle(BOARD_N, BOARD_STEPS, 777);
+    const b = generatePuzzle(BOARD_N, BOARD_STEPS, 777);
+    expect(difficultyScore(a)).toBe(difficultyScore(b));
   });
 });
 

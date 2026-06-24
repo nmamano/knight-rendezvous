@@ -164,10 +164,10 @@ export class Room {
   /**
    * Reset ONLY `pid`'s own knight to its start (locked decision 6). Mirrors
    * Room.move EXACTLY: stale-socket guard (a replaced socket silently no-ops), no
-   * game silently no-ops, a rejected op (post-win `game_over`) errors back to the
-   * ACTOR only, otherwise broadcast. Uniform "ok ⇒ broadcast": we broadcast even
-   * when retry was a no-op (already at start) — there is no "did anything change"
-   * short-circuit.
+   * game silently no-ops, otherwise broadcast. Uniform "ok ⇒ broadcast": we
+   * broadcast even when retry was a no-op (already at start) — there is no "did
+   * anything change" short-circuit. Retry is always allowed (no win-gate): from a
+   * won state it un-meets and returns to "playing" (Game.retry handles that).
    */
   retry(pid: PlayerId, conn: Connection): void {
     const slot = this.slots[pid];
@@ -186,7 +186,8 @@ export class Room {
    * Pop ONLY `pid`'s own last move (locked decision 6). Mirrors Room.move EXACTLY
    * (same stale-socket guard, no-game no-op, error-to-actor, broadcast). Uniform
    * "ok ⇒ broadcast": we broadcast even when undo was a benign no-op (already at
-   * start) — no "did anything change" short-circuit.
+   * start) — no "did anything change" short-circuit. Undo is always allowed (no
+   * win-gate): from a won state it un-meets and returns to "playing".
    */
   undo(pid: PlayerId, conn: Connection): void {
     const slot = this.slots[pid];

@@ -30,8 +30,12 @@ interface Props {
   onMove: (cell: Cell) => void;
   // Fix 1 — the LOCAL player's legal next squares (computed in App to match the
   // server's move() rule, INCLUDING the rendezvous square). Highlighted with a
-  // pulsing accent ring. Empty unless the game is "playing".
+  // pulsing ring. Empty unless the game is "playing".
   legalCells?: Cell[];
+  // Fix 4 — the LOCAL player's id, so the legal-move ring is drawn in THEIR knight
+  // color (p1 = amber, p2 = violet) rather than a shared lavender. null → amber
+  // (a harmless default; legalCells is empty when `you` is unset anyway).
+  you?: PlayerId | null;
   // C5 actor-only hint: the witness cell to pulse for the LOCAL player (null when
   // none). `hintNonce` re-keys the element so a repeat hint restarts the pulse.
   hintCell?: Cell | null;
@@ -43,11 +47,23 @@ function polyPoints(trail: Cell[]): string {
   return trail.map((v) => `${v.c + 0.5},${v.r + 0.5}`).join(" ");
 }
 
-export function Board({ board, knights, visited, onMove, legalCells, hintCell, hintNonce }: Props) {
+export function Board({
+  board,
+  knights,
+  visited,
+  onMove,
+  legalCells,
+  you,
+  hintCell,
+  hintNonce,
+}: Props) {
   const { n, available, start, end } = board;
   // Fix 1 — fast lookup of the local player's legal next squares for the .legal ring.
   const legalSet = new Set<number>();
   for (const lc of legalCells ?? []) legalSet.add(cellKey(lc.r, lc.c));
+  // Fix 4 — the legal ring wears the LOCAL player's knight color (p1 amber, p2
+  // violet). Default to amber when `you` is unset (legalCells is empty then anyway).
+  const legalVariant = you === "p2" ? "legal-violet" : "legal-amber";
   // Board frame is 5px each side; the playable field is n cells + (n-1) gaps.
   const maxBoardPx = n * DESK_CELL + (n - 1) * GAP + 2 * PAD + 10;
 
@@ -85,6 +101,7 @@ export function Board({ board, knights, visited, onMove, legalCells, hintCell, h
               avail ? "open" : "blocked",
               owner === "p1" ? "trail-amber" : owner === "p2" ? "trail-violet" : "",
               isLegal ? "legal" : "",
+              isLegal ? legalVariant : "",
               isHint ? "hint-pulse" : "",
             ]
               .filter(Boolean)

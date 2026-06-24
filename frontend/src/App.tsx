@@ -98,6 +98,24 @@ function legalTargets(
   return out;
 }
 
+// Fix 3 — co-op SCORE, computed CLIENT-side from the snapshot. The original
+// (knights-puzzle) score is the single knight's visited count; the co-op adaptation
+// is the number of cells covered by EITHER knight = |union(visited.p1, visited.p2)|.
+// The denominator is the count of playable (available-true) board cells.
+function coverage(visited: { p1: Cell[]; p2: Cell[] }): number {
+  const covered = new Set<number>();
+  // r*1000+c keying is collision-free for these small boards (n <= 9).
+  for (const v of visited.p1) covered.add(v.r * 1000 + v.c);
+  for (const v of visited.p2) covered.add(v.r * 1000 + v.c);
+  return covered.size;
+}
+
+function availableCount(board: Board): number {
+  let total = 0;
+  for (const row of board.available) for (const a of row) if (a) total++;
+  return total;
+}
+
 function PlayerTag({ name, color, you }: { name: string; color: string; you: boolean }) {
   const swatch = color === "amber" ? "var(--amber)" : "var(--violet)";
   return (
@@ -132,7 +150,7 @@ function WinPanel({ perfect }: { perfect: boolean }) {
         </span>
       ) : (
         <p className="text-sm font-semibold text-[#6b6580]">
-          You met! Some squares were left uncovered — go for a perfect next time.
+          Some squares were left uncovered. Go for a perfect score next time.
         </p>
       )}
     </div>
@@ -205,9 +223,9 @@ export function App() {
           setYou(null);
           setSnapshot(null);
         } else {
-          // An in-game rejection (illegal_move / game_over / bad_message): keep the
-          // room and surface a transient toast. Bump the nonce so an identical
-          // message re-fires it. A post-win `game_over` flows through here too.
+          // An in-game rejection (illegal_move / bad_message): keep the room and
+          // surface a transient toast. Bump the nonce so an identical message
+          // re-fires it. (A post-win move is now a SILENT no-op, not an error.)
           setActionNonce((n) => n + 1);
         }
         break;
@@ -387,12 +405,23 @@ export function App() {
     // "(cells)" count is always self-consistent for the chosen n.
     const sliderN = pendingN ?? snapshot.board.n;
     const sliderSteps = clampSteps(sliderN, pendingSteps ?? snapshot.board.steps);
-    // Your own trail length drives the button-disable UX (server is the authority).
-    // length<=1 means you are at your start: nothing to undo, nothing to retry.
+    // Your own trail length drives the undo-disable UX (server is the authority).
+    // length<=1 means you are at your start: nothing to undo.
     const myTrailLen = you ? snapshot.visited[you].length : 0;
     const atStart = myTrailLen <= 1;
-    const undoDisabled = locked || atStart;
-    const retryDisabled = locked || atStart;
+    // Fix 2 — undo/retry stay available when WON (they un-meet, mirroring the
+    // original stepping back off the goal). They are ONLY disabled during
+    // playback (the one truly input-locked status). Undo additionally disables at
+    // the start (nothing to pop); retry is always enabled off playback (it is an
+    // idempotent reset that also un-meets a won game).
+    const playbackLock = snapshot.status === "playback";
+    const undoDisabled = playbackLock || atStart;
+    const retryDisabled = playbackLock;
+    // Fix 3 — co-op score (covered cells / total playable cells), computed
+    // client-side from the snapshot, and the server-supplied difficulty number.
+    const scoreVal = coverage(snapshot.visited);
+    const totalCells = availableCount(snapshot.board);
+    const difficulty = snapshot.board.difficulty;
     // C6 — "New puzzle" has its OWN enable rule: a room-wide RESET, allowed while
     // "playing" OR "won" (so it works on the win screen — folding it under the
     // shared `locked` predicate would wrongly disable it there), DISABLED only
@@ -410,6 +439,18 @@ export function App() {
           {me && <PlayerTag name={me.name} color={me.color} you />}
           {opp && <PlayerTag name={opp.name} color={opp.color} you={false} />}
         </div>
+        {/* Fix 3 — Score + Difficulty status line (mirrors knights-puzzle's
+            `.status` placement just above the board). Score = cells covered by
+            either knight / total playable cells; Difficulty is the server-computed
+            branching-product number (the witness `path` it derives from never
+            reaches the client). */}
+        <p className="status" role="status" data-status="1">
+          Score {scoreVal} / {totalCells}
+          <span className="status-sep" aria-hidden="true">
+            ·
+          </span>
+          <span className="diff-score">Difficulty {difficulty.toLocaleString()}</span>
+        </p>
         <Board
           board={snapshot.board}
           knights={snapshot.knights}
@@ -419,17 +460,22 @@ export function App() {
           // client-side too.
           onMove={locked ? () => {} : move}
           // Fix 1 — the local player's legal next squares (incl. the rendezvous
-          // square), highlighted with a pulsing accent ring while "playing".
+          // square), highlighted with a pulsing ring while "playing".
           legalCells={legalCells}
+          // Fix 4 — the local player's id, so the ring is drawn in THEIR knight
+          // color (p1 amber, p2 violet).
+          you={you}
           // The actor-only hint cell to pulse (null when none). Keyed by nonce so a
           // repeat hint re-triggers the animation.
           hintCell={hintCell}
           hintNonce={hintNonce}
         />
         {/* Per-player controls (locked decision 6). Retry resets ONLY your knight
-            to its start; Undo pops ONLY your last move. Disabled when the game is
-            won or you are already at your start — but those are UX hints only; the
-            server guards are the authority (no optimistic UI). The look ports
+            to its start; Undo pops ONLY your last move. They STAY available when
+            won (they step a knight off the shared square → un-meet, mirroring the
+            original); only playback truly locks them. Undo also disables at the
+            start (nothing to pop). Those disables are UX hints only — the server
+            guards are the authority (no optimistic UI). The look ports
             knights-puzzle's pill/shadow/handwritten controls into KR's Tailwind. */}
         <div className="flex flex-wrap items-center justify-center gap-3">
           <button

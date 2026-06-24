@@ -8,6 +8,7 @@ import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import app from "../server/index.ts";
 import type { Board, ClientMsg, ServerMsg } from "../shared/protocol";
 import { generatePuzzle, knightMoves, type Cell } from "../shared/engine";
+import { difficultyScore } from "../shared/analysis";
 
 type OfType<K extends ServerMsg["t"]> = Extract<ServerMsg, { t: K }>;
 
@@ -263,6 +264,25 @@ describe("integration (real WS)", () => {
     // available/start/end — both must match.
     expect(s1.board!.seed).toBe(s2.board!.seed);
     expect(sameBoard(s1.board!, s2.board!)).toBe(true);
+    p1.close();
+    p2.close();
+  });
+
+  test("board carries the difficulty NUMBER (derived from the path) but never the path", async () => {
+    const { p1, p2 } = await startGame();
+    const s1 = (await p1.waitFor("state", (m) => m.state.lobby === "active")).state;
+    const board = s1.board!;
+    // Difficulty is a finite number on the wire, identical across clients.
+    expect(typeof board.difficulty).toBe("number");
+    expect(Number.isFinite(board.difficulty)).toBe(true);
+    const s2 = (await p2.waitFor("state", (m) => m.state.lobby === "active")).state;
+    expect(s2.board!.difficulty).toBe(board.difficulty);
+    // It EQUALS a server-side recompute from the regenerated puzzle (proving it is
+    // the genuine branching-product score) — yet the raw `path` it derives from is
+    // NOT on the wire (the dedicated path-leak guard covers that).
+    const regen = generatePuzzle(board.n, board.steps, board.seed);
+    expect(board.difficulty).toBe(difficultyScore(regen));
+    expect(JSON.stringify(s1)).not.toContain('"path"');
     p1.close();
     p2.close();
   });
@@ -597,7 +617,7 @@ describe("C2 movement + sync (real WS)", () => {
     p2.close();
   });
 
-  test("post-win rejection: a move after the win → game_over, state unchanged", async () => {
+  test("post-win move is a SILENT no-op: no error, no state change, status STAYS won", async () => {
     const { p1, p2, init } = await activeGame();
     const board = init.board;
 
@@ -612,26 +632,32 @@ describe("C2 movement + sync (real WS)", () => {
     await p2.waitFor("state", (m) => m.state.status === "won");
 
     // Snapshot the post-win state, then attempt ANY further move (p2 toward an
-    // empty knight neighbor). It must be rejected as game_over, not illegal_move.
+    // empty knight neighbor). `won` is now a SOFT, reversible state: the move is a
+    // SILENT no-op — NO error, NO broadcast, status STAYS "won" (the board is
+    // locked until someone undoes).
     const beforeJson = JSON.stringify(won);
+    const beforeCount = p1.states().length;
     const p2Neighbor = knightMoves(won.knights.p2, board.n).find(
       (m) =>
         board.available[m.r][m.c] && !inCells(won.visited.p1, m) && !inCells(won.visited.p2, m),
     );
-    // If there's no clean empty neighbor, any knight-move target still hits the
-    // post-win guard FIRST; fall back to p2's own prior cell.
     const attempt = p2Neighbor ?? won.visited.p2[0];
     p2.send({ t: "move", cell: attempt });
-    expect((await p2.waitFor("error", (m) => m.code === "game_over")).code).toBe("game_over");
-
-    // State unchanged: p1's last broadcast state is still the winning one.
+    // Prove the move was fully processed-and-swallowed: a following bad_message we
+    // CAN await comes back, but NO error and NO new state arrived for the move.
+    p2.send({ t: "nope" } as unknown as ClientMsg);
+    await p2.waitFor("error", (m) => m.code === "bad_message");
+    expect(p2.last("error")!.code).toBe("bad_message"); // never game_over / illegal_move
+    // No new broadcast happened from the swallowed move; state unchanged + still won.
+    expect(p1.states().length).toBe(beforeCount);
     const after = activeState(p1.last("state")!);
+    expect(after.status).toBe("won");
     expect(JSON.stringify(after)).toBe(beforeJson);
     p1.close();
     p2.close();
   });
 
-  test("rendezvous race: both fire at the partner's cell → one win, the loser gets game_over", async () => {
+  test("rendezvous race: both fire at the partner's cell → one win, the loser gets NO error (silent)", async () => {
     const { p1, p2, init } = await activeGame();
     const board = init.board;
 
@@ -669,7 +695,7 @@ describe("C2 movement + sync (real WS)", () => {
 
     // Fire BOTH at the partner's cell WITHOUT awaiting. The single-threaded room
     // serializes them: the first IS the rendezvous (win); the second now hits the
-    // post-win guard → game_over (NOT illegal_move).
+    // post-win guard → a SILENT no-op (NO error, exactly one win).
     p1.send({ t: "move", cell: p1Aim });
     p2.send({ t: "move", cell: p2Aim });
 
@@ -684,9 +710,16 @@ describe("C2 movement + sync (real WS)", () => {
     const meetIsP2Aim = sameCell(won.result!.meetCell, p2Aim);
     expect(meetIsP1Aim !== meetIsP2Aim).toBe(true);
 
-    // The loser (whoever did NOT win) gets game_over, not illegal_move.
+    // The loser (whoever did NOT win) gets NO error — the second move is a SILENT
+    // no-op now, not a rejection. Prove it was processed-and-swallowed via a
+    // following bad_message we can await; no error from the move itself.
     const loser = meetIsP1Aim ? p2 : p1;
-    expect((await loser.waitFor("error", (m) => m.code === "game_over")).code).toBe("game_over");
+    loser.send({ t: "nope" } as unknown as ClientMsg);
+    await loser.waitFor("error", (m) => m.code === "bad_message");
+    expect(loser.last("error")!.code).toBe("bad_message");
+    // Still exactly one win across both clients; status stays "won".
+    expect(activeState(p1.last("state")!).status).toBe("won");
+    expect(activeState(p2.last("state")!).status).toBe("won");
 
     p1.close();
     p2.close();
@@ -975,7 +1008,7 @@ describe("C4 retry + undo (real WS)", () => {
     p2.close();
   });
 
-  test("both retry and undo are rejected with game_over after a win (state unchanged)", async () => {
+  test("post-win UNDO succeeds: the winning hop is popped → status playing, result null, OTHER untouched", async () => {
     const { p1, p2, init } = await activeGame();
     const board = init.board;
     // Drive p1 onto stationary p2 → rendezvous (clone of the post-win pattern).
@@ -988,20 +1021,113 @@ describe("C4 retry + undo (real WS)", () => {
     p1.send({ t: "move", cell: target });
     const won = activeState(await p1.waitFor("state", (m) => m.state.status === "won"));
     await p2.waitFor("state", (m) => m.state.status === "won");
-    const beforeJson = JSON.stringify(won);
+    // The mover (p1) sits on the shared meet cell; p1's trail ends with it.
+    expect(won.knights.p1).toEqual(target);
+    const p1PrevCell = won.visited.p1[won.visited.p1.length - 2]; // where p1 came from
+    const p2VisitedBefore = JSON.stringify(won.visited.p2);
+    const p2KnightBefore = JSON.stringify(won.knights.p2);
 
-    // Each of retry/undo, from each player, must be rejected as game_over.
-    p1.send({ t: "retry" });
-    expect((await p1.waitFor("error", (m) => m.code === "game_over")).code).toBe("game_over");
+    // p1 UNDOES the winning hop. `won` is reversible: the shared cell is popped, so
+    // p1 steps back off it → status returns to "playing", result null, knights no
+    // longer co-located. The OTHER knight (p2) is byte-identical throughout.
+    // Count-gated waits: the inbox already holds many earlier "playing" states from
+    // the walk, so we must read the NEW broadcast (past the baseline), not a stale one.
+    const baseCount1 = p1.states().length;
+    const baseCount2 = p2.states().length;
     p1.send({ t: "undo" });
-    expect((await p1.waitFor("error", (m) => m.code === "game_over")).code).toBe("game_over");
-    p2.send({ t: "retry" });
-    expect((await p2.waitFor("error", (m) => m.code === "game_over")).code).toBe("game_over");
-    p2.send({ t: "undo" });
-    expect((await p2.waitFor("error", (m) => m.code === "game_over")).code).toBe("game_over");
+    const after = await awaitStateCount(p1, baseCount1 + 1);
+    await awaitStateCount(p2, baseCount2 + 1);
+    expect(after.status).toBe("playing");
+    expect(after.result).toBeNull();
+    expect(after.knights.p1).toEqual(p1PrevCell); // stepped back
+    expect(sameCell(after.knights.p1, after.knights.p2)).toBe(false); // un-met
+    expect(JSON.stringify(after.visited.p2)).toBe(p2VisitedBefore); // p2 untouched
+    expect(JSON.stringify(after.knights.p2)).toBe(p2KnightBefore);
+    // Both clients agree on the un-won state.
+    expect(JSON.stringify(activeState(p2.last("state")!))).toBe(JSON.stringify(after));
+    p1.close();
+    p2.close();
+  });
 
-    // State is unchanged: the last broadcast is still the winning one.
-    expect(JSON.stringify(activeState(p1.last("state")!))).toBe(beforeJson);
+  test("post-win RETRY succeeds: the mover resets to its start → status playing, result null, OTHER untouched", async () => {
+    const { p1, p2, init } = await activeGame();
+    const board = init.board;
+    const target = init.knights.p2;
+    const path = bfsToAdjacent(board, init.knights.p1, target)!;
+    for (const step of path) {
+      p1.send({ t: "move", cell: step });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, step));
+    }
+    p1.send({ t: "move", cell: target });
+    const won = activeState(await p1.waitFor("state", (m) => m.state.status === "won"));
+    await p2.waitFor("state", (m) => m.state.status === "won");
+    const p2VisitedBefore = JSON.stringify(won.visited.p2);
+    const p2KnightBefore = JSON.stringify(won.knights.p2);
+
+    // p1 RETRIES from the won state: it resets to its start, off the shared square
+    // → status returns to "playing", result null, knights no longer co-located.
+    // The OTHER knight (p2) is byte-identical. Count-gated waits (the inbox holds
+    // stale "playing" states from the walk).
+    const baseCount1 = p1.states().length;
+    const baseCount2 = p2.states().length;
+    p1.send({ t: "retry" });
+    const after = await awaitStateCount(p1, baseCount1 + 1);
+    await awaitStateCount(p2, baseCount2 + 1);
+    expect(after.status).toBe("playing");
+    expect(after.result).toBeNull();
+    expect(after.visited.p1).toEqual([init.knights.p1]); // collapsed to start
+    expect(after.knights.p1).toEqual(init.knights.p1);
+    expect(sameCell(after.knights.p1, after.knights.p2)).toBe(false); // un-met
+    expect(JSON.stringify(after.visited.p2)).toBe(p2VisitedBefore); // p2 untouched
+    expect(JSON.stringify(after.knights.p2)).toBe(p2KnightBefore);
+    expect(JSON.stringify(activeState(p2.last("state")!))).toBe(JSON.stringify(after));
+    p1.close();
+    p2.close();
+  });
+
+  test("imperfect rendezvous → undo un-meets → status playing, result null, knights apart, play continues", async () => {
+    const { p1, p2, init } = await activeGame();
+    const board = init.board;
+    // Drive p1 straight onto STATIONARY p2 (a premature/imperfect meet — most of
+    // the board uncovered, so the win is soft, not perfect).
+    const target = init.knights.p2;
+    const path = bfsToAdjacent(board, init.knights.p1, target)!;
+    for (const step of path) {
+      p1.send({ t: "move", cell: step });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, step));
+    }
+    p1.send({ t: "move", cell: target });
+    const won = activeState(await p1.waitFor("state", (m) => m.state.status === "won"));
+    await p2.waitFor("state", (m) => m.state.status === "won");
+    expect(won.result!.perfect).toBe(false); // imperfect meet
+    const p1PrevCell = won.visited.p1[won.visited.p1.length - 2];
+
+    // Undo the winning hop → un-meet. Count-gated waits (stale "playing" states
+    // from the walk are already in the inbox).
+    const baseCount1 = p1.states().length;
+    const baseCount2 = p2.states().length;
+    p1.send({ t: "undo" });
+    const after = await awaitStateCount(p1, baseCount1 + 1);
+    await awaitStateCount(p2, baseCount2 + 1);
+    expect(after.status).toBe("playing");
+    expect(after.result).toBeNull();
+    expect(sameCell(after.knights.p1, after.knights.p2)).toBe(false); // no longer co-located
+    expect(after.knights.p1).toEqual(p1PrevCell);
+
+    // Play can continue: p1 makes a subsequent LEGAL move from its restored cell.
+    const next = legalTarget(
+      after.board,
+      after.knights.p1,
+      after.visited.p1,
+      after.visited.p2,
+      after.knights.p2,
+    );
+    expect(next).not.toBeNull();
+    p1.send({ t: "move", cell: next! });
+    const cont = await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, next!));
+    expect(cont.knights.p1).toEqual(next!);
+    expect(cont.status).toBe("playing");
+    expect(p1.last("error")).toBeNull();
     p1.close();
     p2.close();
   });
@@ -1247,18 +1373,18 @@ describe("C5 view-solution + hint (real WS)", () => {
       await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, step));
     }
     p1.send({ t: "move", cell: target });
-    const won = activeState(await p1.waitFor("state", (m) => m.state.status === "won"));
+    await p1.waitFor("state", (m) => m.state.status === "won");
     await p2.waitFor("state", (m) => m.state.status === "won");
 
     const countBefore = p1.states().length;
     p1.send({ t: "viewSolution" });
-    // Give the server a round-trip: send a hint (also ignored while won) and a
-    // benign ping via another viewSolution — none should produce any broadcast.
+    // Give the server a round-trip: send another viewSolution (also ignored while
+    // won) — neither should produce any broadcast.
     p2.send({ t: "viewSolution" });
-    // A subsequent legal-ish move attempt yields a game_over error we CAN await,
-    // proving the prior viewSolution messages were fully processed (and ignored).
-    p1.send({ t: "move", cell: won.visited.p1[0] });
-    expect((await p1.waitFor("error", (m) => m.code === "game_over")).code).toBe("game_over");
+    // A subsequent bad_message we CAN await proves the prior viewSolution messages
+    // were fully processed (and ignored — `won` is not "playing", so no playback).
+    p1.send({ t: "nope" } as unknown as ClientMsg);
+    expect((await p1.waitFor("error", (m) => m.code === "bad_message")).code).toBe("bad_message");
 
     // No new state broadcast happened from the viewSolution attempts (the only new
     // states, if any, would carry status "playback" — there must be none).
@@ -1418,9 +1544,10 @@ describe("C5 view-solution + hint (real WS)", () => {
 
       const hintsBefore = p1.inboxCount("hint");
       p1.send({ t: "hint" });
-      // Prove the hint was processed-and-ignored: a following move errors game_over.
-      p1.send({ t: "move", cell: init.knights.p1 });
-      await p1.waitFor("error", (m) => m.code === "game_over");
+      // Prove the hint was processed-and-ignored: a following bad_message we can
+      // await comes back (a post-win move is now a silent no-op, not an error).
+      p1.send({ t: "nope" } as unknown as ClientMsg);
+      await p1.waitFor("error", (m) => m.code === "bad_message");
       expect(p1.inboxCount("hint")).toBe(hintsBefore);
       p1.close();
       p2.close();

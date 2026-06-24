@@ -306,6 +306,61 @@ try {
     if (expected.size === 0) {
       throw new Error("expected at least one legal cell highlighted at game start");
     }
+
+    // ---- Fix 4: the legal ring wears the LOCAL player's color. Context A is p1
+    // (amber) → every legal cell must carry the `legal-amber` variant class (and
+    // none the violet one); context B is p2 (violet) → the inverse. Judged from the
+    // DOM class list (the ring color is purely visual, so this IS the check).
+    const aVariants = await pageA.evaluate(() =>
+      Array.from(document.querySelectorAll('[data-legal="1"]')).map((el) => ({
+        amber: el.classList.contains("legal-amber"),
+        violet: el.classList.contains("legal-violet"),
+      })),
+    );
+    if (!aVariants.length || !aVariants.every((v) => v.amber && !v.violet)) {
+      throw new Error(
+        `context A (p1) legal cells are not all amber-colored: ${JSON.stringify(aVariants)}`,
+      );
+    }
+    const bVariants = await pageB.evaluate(() =>
+      Array.from(document.querySelectorAll('[data-legal="1"]')).map((el) => ({
+        amber: el.classList.contains("legal-amber"),
+        violet: el.classList.contains("legal-violet"),
+      })),
+    );
+    if (!bVariants.length || !bVariants.every((v) => v.violet && !v.amber)) {
+      throw new Error(
+        `context B (p2) legal cells are not all violet-colored: ${JSON.stringify(bVariants)}`,
+      );
+    }
+  }
+
+  // ---- Fix 3: the Score + Difficulty status line is visible on both contexts and
+  // matches the server-authoritative snapshot (score = union coverage / available;
+  // difficulty = the board's difficulty number). The witness path stays off-wire.
+  for (const [page, label] of [
+    [pageA, "A"],
+    [pageB, "B"],
+  ]) {
+    const statusText = await page.locator('[data-status="1"]').innerText();
+    const s = await page.evaluate(() => ({
+      visited: window.__KR__.visited,
+      board: window.__KR__.board,
+    }));
+    const covered = new Set();
+    for (const v of s.visited.p1) covered.add(v.r * 1000 + v.c);
+    for (const v of s.visited.p2) covered.add(v.r * 1000 + v.c);
+    let avail = 0;
+    for (const row of s.board.available) for (const a of row) if (a) avail++;
+    if (typeof s.board.difficulty !== "number") {
+      throw new Error(`[${label}] board.difficulty is not a number: ${s.board.difficulty}`);
+    }
+    if (!statusText.includes(`Score ${covered.size} / ${avail}`)) {
+      throw new Error(`[${label}] status line missing the expected score: "${statusText}"`);
+    }
+    if (!/Difficulty\s/.test(statusText)) {
+      throw new Error(`[${label}] status line missing the difficulty: "${statusText}"`);
+    }
   }
 
   // ---- C3: drive a FULL-COVER rendezvous to a PERFECT win -----------------
@@ -636,6 +691,47 @@ try {
     throw new Error("post-win snapshot leaked the witness path");
   }
 
+  // ---- Fix 2: UNDO un-sets `won` (the soft, reversible win). The Undo button is
+  // ENABLED on the win screen now; clicking it steps p1 off the shared meet cell →
+  // status returns to "playing", result null, knights no longer co-located. Then we
+  // re-do the meet-hop so the New-puzzle choreography below still runs from a win.
+  await pageA.getByRole("button", { name: "Undo" }).click();
+  for (const [page, label] of [
+    [pageA, "A"],
+    [pageB, "B"],
+  ]) {
+    await page.waitForFunction(
+      (mc) => {
+        const s = window.__KR__;
+        return (
+          s &&
+          s.status === "playing" &&
+          s.result === null &&
+          s.knights &&
+          // p1 has stepped back off the shared meet cell (no longer co-located).
+          !(s.knights.p1.r === mc.r && s.knights.p1.c === mc.c)
+        );
+      },
+      meetCell,
+      { timeout: 15000 },
+    );
+    const after = await page.evaluate(() => ({
+      status: window.__KR__.status,
+      result: window.__KR__.result,
+    }));
+    if (after.status !== "playing" || after.result !== null) {
+      throw new Error(`[${label}] undo did not un-set the win: ${JSON.stringify(after)}`);
+    }
+  }
+  // Re-do the winning hop (p1 is a knight-move from p2/meetCell again, since undo
+  // only moved p1 one step back) to restore the won state for the New-puzzle check.
+  await pageA.locator(`[data-cell="${meetCell.r}-${meetCell.c}"]`).click();
+  for (const page of [pageA, pageB]) {
+    await page.waitForFunction(() => window.__KR__ && window.__KR__.status === "won", {
+      timeout: 15000,
+    });
+  }
+
   // ---- C6: NEW PUZZLE (room-wide reset) — both contexts get a fresh identical
   // board with knights reset to start/end. Drive the real "New puzzle" button on
   // context A (it is enabled on the WIN screen by its own enable rule). Judge via
@@ -819,6 +915,9 @@ try {
         fix1LegalHighlightVerified: true,
         fix1RendezvousHighlighted: true,
         fix2ParamNewPuzzleVerified: true,
+        fix2UndoUnsetsWonVerified: true,
+        fix3ScoreDifficultyVisible: true,
+        fix4LegalHighlightColorMatchesPlayer: true,
         chrome: browser.version(),
       },
       null,

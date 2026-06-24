@@ -32,6 +32,10 @@ export interface PlayerView {
  * to render it.
  *
  * The witness `path` is deliberately NOT here — it stays server-side only.
+ *
+ * `difficulty` is the branching-product difficulty score (analysis.ts), computed
+ * SERVER-side from the witness `path`. Only this single NUMBER crosses the wire —
+ * the `path` it is derived from never does. The client displays it as-is.
  */
 export interface Board {
   n: number;
@@ -40,6 +44,7 @@ export interface Board {
   available: boolean[][];
   start: Cell;
   end: Cell;
+  difficulty: number;
 }
 
 /**
@@ -57,10 +62,13 @@ export interface Board {
  *
  * `status` is "playing" while the rendezvous is still open, "won" once one knight
  * has hopped onto the other's square (locked decision 1), and "playback" while a
- * view-solution animation is running (locked decision 7). Playback is room-wide
- * and REVERSIBLE: when it ends the status returns to "playing" with the
- * pre-playback knights/visited restored — view-solution NEVER marks the puzzle
- * solved. `result` is null while waiting AND while playing AND during playback;
+ * view-solution animation is running (locked decision 7). `won` is a SOFT,
+ * REVERSIBLE state (mirroring the original knights-puzzle): a move while won is a
+ * silent no-op, but undo/retry step a knight back off the shared square and return
+ * the status to "playing". Playback is room-wide and REVERSIBLE too: when it ends
+ * the status returns to "playing" with the pre-playback knights/visited restored —
+ * view-solution NEVER marks the puzzle solved. `result` is null while waiting AND
+ * while playing AND during playback;
  * only once won does it carry whether the win was `perfect` (every playable square
  * covered by ≥1 trail) and the `meetCell` where the two knights met (the one
  * allowed shared square). The knights/visited mutate frame-by-frame during
@@ -88,10 +96,14 @@ export type ClientMsg =
   | { t: "move"; cell: Cell }
   // Reset ONLY the sender's own knight to its start, freeing its whole trail
   // (locked decision 6). Like move, the player is inferred from the bound slot
-  // and there are no payload fields. Forbidden once the game is won.
+  // and there are no payload fields. `won` is REVERSIBLE: retrying from a won
+  // state moves the mover off the shared square → un-meets (status back to
+  // "playing", result null), mirroring the original resetGame clearing `won`.
   | { t: "retry" }
   // Pop ONLY the sender's own last move (locked decision 6). No payload fields;
-  // a benign no-op when the knight is already at its start. Forbidden once won.
+  // a benign no-op when the knight is already at its start. `won` is REVERSIBLE:
+  // an undo from a won state pops the shared rendezvous cell → un-meets (status
+  // back to "playing"), mirroring the original undoMove clearing `won`.
   | { t: "undo" }
   // Trigger the view-solution animation for the WHOLE room (locked decision 7):
   // both knights animate along the witness toward the rendezvous. No payload —
@@ -124,8 +136,7 @@ export type ErrorCode =
   | "room_full"
   | "bad_token"
   | "bad_message"
-  | "illegal_move"
-  | "game_over";
+  | "illegal_move";
 
 export type ServerMsg =
   // `you` and `token` are returned ONLY here — never in a broadcast.

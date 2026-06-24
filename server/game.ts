@@ -12,6 +12,7 @@
 // and a hint projects only the SINGLE next witness cell, never the whole path.
 
 import { generatePuzzle, knightMoves, type Cell, type Puzzle } from "../shared/engine";
+import { difficultyScore } from "../shared/analysis";
 import { BOARD_N, BOARD_STEPS, PLAYBACK_STEP_MS, clampN, clampSteps } from "../shared/config";
 import type { Board, ColorToken, PlayerId, PlayerView, RoomSnapshot } from "../shared/protocol";
 
@@ -29,10 +30,13 @@ export interface GamePlayer {
 // Discriminated result for a move attempt, mirroring chess's Match.move →
 // Room.move contract (an ActionResult). On failure, the room sends the error to
 // the ACTOR only; on success, it broadcasts the new state. The failure `code` is
-// `illegal_move` for a rule violation and `game_over` once the rendezvous has
-// already happened (the post-win guard, check (0)).
+// `illegal_move` for a rule violation. There is deliberately NO hard game-over:
+// `won` is a SOFT, REVERSIBLE state (mirroring the original knights-puzzle) — a
+// post-win move is a SILENT no-op (the board stays locked until someone undoes),
+// and undo/retry remain available to step back off the shared square and keep
+// playing.
 export interface MoveError {
-  code: "illegal_move" | "game_over";
+  code: "illegal_move";
   message: string;
 }
 // A move/retry/undo attempt resolves to one of THREE outcomes for the Room:
@@ -51,12 +55,8 @@ function fail(message: string): MoveResult {
   return { ok: false, error: { code: "illegal_move", message } };
 }
 
-function gameOver(message: string): MoveResult {
-  return { ok: false, error: { code: "game_over", message } };
-}
-
-// The silent no-op result: the op was swallowed (playback in progress) with no
-// state change, no broadcast, and no error to the actor.
+// The silent no-op result: the op was swallowed (playback in progress, OR a move
+// while already won) with no state change, no broadcast, and no error to the actor.
 function silentNoop(): MoveResult {
   return { ok: true, silent: true };
 }
@@ -124,15 +124,21 @@ export class Game {
   // not carry `steps`; board() projects it so both clients echo the same value
   // (and the sliders can initialize from it).
   readonly steps: number;
+  // The branching-product difficulty score (analysis.ts), computed ONCE here from
+  // the witness `path` and projected as a plain NUMBER on board(). The `path` it
+  // derives from is server-only and never crosses the wire.
+  readonly difficulty: number;
   // Knight positions. p1 starts on the puzzle start, p2 on the end (locked
   // decision 3). In C1 they never move; C2 will mutate these on validated hops.
   readonly knights: { p1: Cell; p2: Cell };
   // Each knight's trail (ordered visited squares, including its start). Seeded
   // here so C2's movement/sync has the structure ready; unused in C1 rendering.
   readonly visited: { p1: Cell[]; p2: Cell[] };
-  // Status. "playing" until the rendezvous hop flips it to "won" (forever — there
-  // is no un-winning), OR until a view-solution flips it to "playback" (C5). Unlike
-  // "won", "playback" is REVERSIBLE: it returns to "playing" when playback ends
+  // Status. "playing" until the rendezvous hop flips it to "won", OR until a
+  // view-solution flips it to "playback" (C5). "won" is a SOFT, REVERSIBLE state
+  // (mirroring the original knights-puzzle): a move while won is a silent no-op,
+  // but undo/retry step a knight back off the shared square and return to
+  // "playing". "playback" is REVERSIBLE too: it returns to "playing" when it ends
   // (locked decision 7 — view-solution never marks the puzzle solved). `result`
   // stays null until a win, then carries soft-vs-perfect + the shared meeting cell;
   // it is never set during playback.
@@ -162,6 +168,9 @@ export class Game {
     const cSteps = clampSteps(cn, steps);
     this.steps = cSteps;
     this.puzzle = generatePuzzle(cn, cSteps, seed);
+    // Compute difficulty ONCE from the witness path (server-only); board() emits
+    // just this number.
+    this.difficulty = difficultyScore(this.puzzle);
     const start: Cell = { r: this.puzzle.start.r, c: this.puzzle.start.c };
     const end: Cell = { r: this.puzzle.end.r, c: this.puzzle.end.c };
     this.knights = { p1: start, p2: end };
@@ -182,7 +191,10 @@ export class Game {
    * indexing `available`, so a malformed/off-board target is a clean
    * `illegal_move`, never a crash:
    *   (0) POST-WIN GUARD (first, unconditional): if already `won`, short-circuit
-   *       with `game_over`. No move may follow the rendezvous.
+   *       with a SILENT no-op. `won` is a SOFT, REVERSIBLE state (mirroring the
+   *       original knights-puzzle, whose tryMove no-ops when won): the board stays
+   *       locked at the rendezvous, but undo/retry can step a knight back off the
+   *       shared square to keep playing. No error is raised (the UI lock is enough).
    *   (a) `cell` is a legal knight move from this knight's CURRENT cell;
    *   (b) `cell` is in-bounds AND available[r][c] is true;
    *   (W) RENDEZVOUS WIN-CHECK: if `cell` is the OTHER knight's CURRENT cell, this
@@ -211,10 +223,12 @@ export class Game {
       return silentNoop();
     }
 
-    // (0) post-win guard FIRST — unconditional short-circuit. Once the rendezvous
-    // has happened the game is over; no further move is accepted from either side.
+    // (0) post-win guard FIRST — SILENT no-op. `won` is a soft, reversible state
+    // (mirroring the original tryMove, which no-ops when won): the board is locked
+    // at the rendezvous, but undo/retry can un-meet. We swallow the move WITHOUT
+    // an error (status STAYS "won" until someone undoes).
     if (this.status === "won") {
-      return gameOver("The game is over.");
+      return silentNoop();
     }
 
     // (a) legal knight move from the current cell.
@@ -278,6 +292,11 @@ export class Game {
    * snaps knights[pid] back to it, preserving the invariant
    * knights.pX === visited.pX[last]. Idempotent when already at the start.
    *
+   * `won` is REVERSIBLE (mirroring the original resetGame, which always works and
+   * clears `won`): retrying from a won state moves the mover's knight off the
+   * shared rendezvous square → the two knights are no longer co-located, so we
+   * un-meet (status → "playing", result → null). Playing on continues.
+   *
    * Freed cells correctly become legal again for EITHER knight — the no-reuse
    * union (move check (c)) recomputes from the LIVE trails, so there is nothing
    * else to update here.
@@ -288,16 +307,17 @@ export class Game {
     if (this.status === "playback") {
       return silentNoop();
     }
-    // Win-blocked: retry is an in-play affordance only (locked decision 6). Since
-    // it can only run while playing, status/result are already "playing"/null —
-    // intentionally NOT reset here (no dead status="playing"/result=null writes).
-    if (this.status === "won") {
-      return gameOver("The game is over.");
-    }
     const start = this.visited[pid][0];
     this.visited[pid] = [start];
     // CLONE the start cell so knights[pid] is not an alias of visited[pid][0].
     this.knights[pid] = { r: start.r, c: start.c };
+    // Retry un-meets a won game: the mover's knight is back on its own start, so
+    // the knights are no longer on the shared square (mirrors the original
+    // resetGame clearing `won`). Return to live play.
+    if (this.status === "won") {
+      this.status = "playing";
+      this.result = null;
+    }
     return { ok: true };
   }
 
@@ -308,6 +328,12 @@ export class Game {
    * pops the last visited cell and snaps knights[pid] to the new last cell,
    * preserving the invariant knights.pX === visited.pX[last].
    *
+   * `won` is REVERSIBLE (mirroring the original undoMove, which steps back off the
+   * goal and clears `won`): the winning hop appended the shared rendezvous cell to
+   * the mover's trail (length > 1), so an undo from a won state always pops, moving
+   * that knight off the shared square → the knights are no longer co-located, so we
+   * un-meet (status → "playing", result → null) and play continues.
+   *
    * The vacated cell becomes legal again for EITHER knight via the same live-trail
    * no-reuse recompute as retry — nothing else to update.
    */
@@ -317,11 +343,6 @@ export class Game {
     if (this.status === "playback") {
       return silentNoop();
     }
-    // Win-blocked, same reasoning as retry: status/result are already
-    // "playing"/null when this runs — intentionally NOT reset here.
-    if (this.status === "won") {
-      return gameOver("The game is over.");
-    }
     if (this.visited[pid].length <= 1) {
       return { ok: true }; // already at start — benign no-op, no mutation
     }
@@ -329,6 +350,13 @@ export class Game {
     const last = this.visited[pid][this.visited[pid].length - 1];
     // CLONE the new last cell so knights[pid] is not an alias of the trail entry.
     this.knights[pid] = { r: last.r, c: last.c };
+    // Undo un-meets a won game: the popped cell was the shared rendezvous square,
+    // so the mover's knight has stepped back off it (mirrors the original undoMove
+    // clearing `won`). Return to live play.
+    if (this.status === "won") {
+      this.status = "playing";
+      this.result = null;
+    }
     return { ok: true };
   }
 
@@ -523,9 +551,10 @@ export class Game {
   /**
    * Project the public Board. Carries the full (n, steps, seed) triple so any
    * client/test reproduces the puzzle deterministically, plus the derived
-   * available/start/end. Arrays are CLONED so neither tests nor server internals
-   * can mutate engine-owned state through the snapshot. The witness `path` is
-   * NEVER included.
+   * available/start/end and the precomputed `difficulty` NUMBER. Arrays are CLONED
+   * so neither tests nor server internals can mutate engine-owned state through the
+   * snapshot. The witness `path` is NEVER included — only the difficulty number it
+   * was derived from.
    */
   board(): Board {
     const p = this.puzzle;
@@ -536,6 +565,8 @@ export class Game {
       available: p.available.map((row) => row.slice()),
       start: { r: p.start.r, c: p.start.c },
       end: { r: p.end.r, c: p.end.c },
+      // The difficulty NUMBER only — never the `path` it was derived from.
+      difficulty: this.difficulty,
     };
   }
 
