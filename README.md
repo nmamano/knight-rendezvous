@@ -14,5 +14,6 @@ square**. Move freely, no turns.
 Built via a gated slice loop — see [`plans/knight-rendezvous-loop.md`](plans/knight-rendezvous-loop.md).
 
 ## Status
-C1 done — pairing + identical server-generated board with two distinctly-colored
-knights (P1 amber on start, P2 violet on end). Next: C2 (live independent movement).
+C2 done — both players hop their own knight live (not turn-based); the server
+validates every move and broadcasts, so both clients see both knights and both
+trails in sync. Next: C3 (rendezvous / same-square win).

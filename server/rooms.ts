@@ -12,6 +12,7 @@
 
 import { customAlphabet } from "nanoid";
 import { Game, colorOf, type GamePlayer } from "./game";
+import type { Cell } from "../shared/engine";
 import {
   RECONNECT_GRACE_MS,
   CODE_LENGTH,
@@ -120,6 +121,27 @@ export class Room {
     return { pid };
   }
 
+  // ---- gameplay ---------------------------------------------------------
+
+  /**
+   * Hop `pid`'s OWN knight to `cell`. Near-verbatim of chess Room.move:
+   * stale-socket guard (a replaced socket silently no-ops), no game silently
+   * no-ops, an illegal move errors back to the ACTOR only, otherwise broadcast.
+   * Concurrency ("first valid wins") falls out for free from the single-threaded
+   * room: the later of two racing moves to the same target just gets the error.
+   */
+  move(pid: PlayerId, cell: Cell, conn: Connection): void {
+    const slot = this.slots[pid];
+    if (!slot || slot.conn !== conn) return; // a replaced/stale socket may not act
+    if (!this.game) return;
+    const res = this.game.move(pid, cell);
+    if (!res.ok) {
+      conn.send({ t: "error", code: res.error.code, message: res.error.message });
+      return;
+    }
+    this.broadcast();
+  }
+
   // ---- presence / teardown ---------------------------------------------
 
   /** Called when a socket closes. `conn` guards against a stale (replaced) socket. */
@@ -179,6 +201,7 @@ export class Room {
         players: [{ id: p1.id, color: colorOf(p1.id), name: p1.name, connected: p1.connected }],
         board: null,
         knights: null,
+        visited: null,
       };
     }
     return {
@@ -187,6 +210,7 @@ export class Room {
       players: this.game.playerViews(),
       board: this.game.board(),
       knights: this.game.snapshotKnights(),
+      visited: this.game.snapshotVisited(),
     };
   }
 

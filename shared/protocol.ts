@@ -47,8 +47,13 @@ export interface Board {
  * One identical snapshot is sent to both players; per-client identity (your
  * PlayerId and reconnect token) is delivered once, in `joined`.
  *
- * `board` and `knights` are null while waiting and both set once active. p1's
- * knight starts on board.start, p2's on board.end (see game.ts).
+ * `board`, `knights`, and `visited` are null while waiting and all set once
+ * active. p1's knight starts on board.start, p2's on board.end (see game.ts).
+ *
+ * `visited` is each knight's FULL trail, INCLUDING its start cell:
+ * `visited.pX[0]` is the start cell and `visited.pX[last]` is the knight's
+ * CURRENT cell — so `knights.pX === visited.pX[last]` always holds. The witness
+ * solution is NEVER projected; intentionally there is no field named `path`.
  */
 export interface RoomSnapshot {
   code: string;
@@ -56,6 +61,7 @@ export interface RoomSnapshot {
   players: PlayerView[];
   board: Board | null;
   knights: { p1: Cell; p2: Cell } | null;
+  visited: { p1: Cell[]; p2: Cell[] } | null;
 }
 
 // ---- client → server -------------------------------------------------------
@@ -64,11 +70,19 @@ export type ClientMsg =
   | { t: "create"; name?: string }
   | { t: "join"; code: string; name?: string }
   | { t: "reconnect"; code: string; token: string }
+  // Hop the SENDER's own knight to `cell`. The player is inferred server-side
+  // from the bound slot — it is deliberately NOT carried on the wire.
+  | { t: "move"; cell: Cell }
   | { t: "leave" };
 
 // ---- server → client -------------------------------------------------------
 
-export type ErrorCode = "room_not_found" | "room_full" | "bad_token" | "bad_message";
+export type ErrorCode =
+  | "room_not_found"
+  | "room_full"
+  | "bad_token"
+  | "bad_message"
+  | "illegal_move";
 
 export type ServerMsg =
   // `you` and `token` are returned ONLY here — never in a broadcast.

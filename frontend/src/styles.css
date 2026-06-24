@@ -98,6 +98,40 @@
   pointer-events: none;
 }
 
+/* Trail tint: each visited cell washes in its owner's color (p1 amber, p2
+   violet). Ported from KP's .open.visited, split per player. INSET treatments so
+   they never fight the grid or get clipped. */
+.cell.open.trail-amber {
+  background: color-mix(in srgb, var(--amber) 32%, var(--path));
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--amber-ink) 45%, transparent);
+}
+.cell.open.trail-violet {
+  background: color-mix(in srgb, var(--violet) 32%, var(--path));
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--violet-ink) 45%, transparent);
+}
+
+/* Route edges tracing each knight's path so far (ported from KP's .trail). The
+   layer aligns to the grid inside the 5px board frame. */
+.trail {
+  position: absolute;
+  inset: 5px;
+  pointer-events: none;
+  z-index: 1;
+  filter: drop-shadow(0 0 1.2px rgba(20, 28, 14, 0.7));
+}
+.trail-line {
+  fill: none;
+  stroke-width: 0.1;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.trail-amber-line {
+  stroke: var(--amber);
+}
+.trail-violet-line {
+  stroke: var(--violet);
+}
+
 /* Endpoint glyphs (start ◎ / end 🏁), matching KP. */
 .glyph {
   position: relative;

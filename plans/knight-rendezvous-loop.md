@@ -135,7 +135,7 @@ DNS / custom subdomain changes      # runs as Nil
   puzzle (seed) and broadcasts the SAME board; both browsers render the grass/hedge
   board with P1 knight on `start`, P2 knight on `end` (distinct colors). Baseline
   gates green. *(Tracer through net + render + theme.)*
-- [ ] **C2 — Independent live movement + sync.** Each player hops their own knight
+- [x] **C2 — Independent live movement + sync.** Each player hops their own knight
   (not turn-based); server validates (legal knight move, target unvisited by
   either, belongs to that player) + broadcasts; both clients see both trails.
 - [ ] **C3 — Win/meet detection.** Shared-engine rendezvous logic (same-square per

@@ -3,6 +3,7 @@ import { Lobby } from "@/components/Lobby";
 import { Waiting } from "@/components/Waiting";
 import { Board } from "@/components/Board";
 import { Net, type Status } from "@/net/socket";
+import type { Cell } from "@shared/engine";
 import type { PlayerId, RoomSnapshot, ServerMsg } from "@shared/protocol";
 
 const SESSION_KEY = "knight-rendezvous";
@@ -76,6 +77,9 @@ export function App() {
   const [you, setYou] = useState<PlayerId | null>(null);
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Bumps on every in-game rejection (illegal_move) so the toast re-fires even
+  // when the message text is identical to the previous one (chess pattern).
+  const [actionNonce, setActionNonce] = useState(0);
   const [opponentLeft, setOpponentLeft] = useState(false);
 
   const netRef = useRef<Net | null>(null);
@@ -104,6 +108,10 @@ export function App() {
           clearSession();
           setYou(null);
           setSnapshot(null);
+        } else {
+          // An in-game rejection (illegal_move, …): keep the room and surface a
+          // transient toast. Bump the nonce so an identical message re-fires it.
+          setActionNonce((n) => n + 1);
         }
         break;
     }
@@ -128,13 +136,27 @@ export function App() {
     return () => net.close();
   }, [handleMessage]);
 
-  // Publish the evidence surface. The smoke gate reads window.__KR__.board from
-  // both contexts and asserts they are byte-identical (server is the oracle).
+  // Publish the evidence surface. The smoke gate reads window.__KR__ from both
+  // contexts and asserts board/knights/visited are byte-identical (server is the
+  // oracle). Spreading the snapshot exposes `visited` automatically.
   useEffect(() => {
     if (snapshot) {
       window.__KR__ = { ...snapshot, you, ready: true };
     }
   }, [snapshot, you]);
+
+  // Transient, non-blocking toast for in-game rejections (illegal_move). Re-fires
+  // on each actionNonce bump even if the message text repeats.
+  const [toast, setToast] = useState<string | null>(null);
+  useEffect(() => {
+    if (!error) {
+      setToast(null); // a later success cleared the error → drop any stale toast
+      return;
+    }
+    setToast(error);
+    const id = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(id);
+  }, [error, actionNonce]);
 
   // User-initiated create/join: clear any stored session FIRST so a stale
   // reconnect isn't replayed ahead of this and silently swallow it (the server
@@ -149,6 +171,15 @@ export function App() {
     clearSession();
     setError(null);
     netRef.current?.send({ t: "join", code, name });
+  }, []);
+
+  // Permissive: send the move for ANY clicked cell. The server is authoritative
+  // and rejects illegal moves; we render only on the resulting server `state`
+  // (no optimistic UI). Clearing the error first means a success that follows a
+  // prior rejection drops the stale toast.
+  const move = useCallback((cell: Cell) => {
+    setError(null);
+    netRef.current?.send({ t: "move", cell });
   }, []);
 
   const exit = useCallback(() => {
@@ -176,7 +207,7 @@ export function App() {
     );
   } else if (snapshot.lobby === "waiting") {
     view = <Waiting code={snapshot.code} onCancel={exit} />;
-  } else if (snapshot.board && snapshot.knights) {
+  } else if (snapshot.board && snapshot.knights && snapshot.visited) {
     const me = snapshot.players.find((p) => p.id === you);
     const opp = snapshot.players.find((p) => p.id !== you);
     view = (
@@ -188,14 +219,19 @@ export function App() {
           {me && <PlayerTag name={me.name} color={me.color} you />}
           {opp && <PlayerTag name={opp.name} color={opp.color} you={false} />}
         </div>
-        <Board board={snapshot.board} knights={snapshot.knights} />
+        <Board
+          board={snapshot.board}
+          knights={snapshot.knights}
+          visited={snapshot.visited}
+          onMove={move}
+        />
         {opponentLeft && (
           <p className="rounded-2xl bg-[#9a4a4a]/10 px-4 py-2 text-sm font-semibold text-[#9a4a4a]">
             Your opponent left the room.
           </p>
         )}
         <p className="text-sm text-[#6b6580]">
-          Same board, two knights. Movement arrives in the next slice.
+          Hop your knight to a knight-move square. The other knight is blocked — for now.
         </p>
       </main>
     );
@@ -209,6 +245,16 @@ export function App() {
         </div>
       )}
       {view}
+      {toast && (
+        <div className="fixed inset-x-0 bottom-4 z-30 flex justify-center px-4">
+          <button
+            onClick={() => setToast(null)}
+            className="rounded-2xl border-2 border-[#9a4a4a]/40 bg-white px-4 py-2 text-sm font-semibold text-[#9a4a4a] shadow-[0_4px_0_0_#d6d8e6]"
+          >
+            {toast}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

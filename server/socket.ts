@@ -1,18 +1,37 @@
 // WebSocket connection handling: parse/validate/dispatch ClientMsg, manage each
 // socket's binding to a room slot. All game state + broadcasting lives in Room.
 //
-// Adapted from round-trip-chess/server/socket.ts, reduced to the C1 message set
-// (create / join / reconnect / leave) — there is no move/turn machinery yet.
-// Boundary validation here is the first line of defense: it rejects structurally
-// malformed payloads (e.g. a non-string room code) before they reach the store.
+// Adapted from round-trip-chess/server/socket.ts. Message set: create / join /
+// reconnect / leave / move (NOT turn-based — a move is always for the sender's
+// own knight, inferred from the bound slot). Boundary validation here is the
+// first line of defense: it rejects structurally malformed payloads (e.g. a
+// non-string room code or a non-{r,c} move cell) before they reach the store;
+// game-rule legality is decided in Game.move, not here.
 
 import { createBunWebSocket } from "hono/bun";
 import type { Hono } from "hono";
 import type { WSContext } from "hono/ws";
 import { type Connection, type Room, RoomStore } from "./rooms";
 import type { ClientMsg, PlayerId } from "../shared/protocol";
+import type { Cell } from "../shared/engine";
 
 const { upgradeWebSocket, websocket } = createBunWebSocket();
+
+const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v);
+
+// Thin ENVELOPE validation for a `move` payload's `cell`: it must be an object
+// with integer r and c. This is structural only — out-of-range / blocked /
+// illegal is a GAME rule that Game.move handles (it bounds-checks BEFORE indexing
+// `available`, so bad indices never throw, they return illegal_move).
+function parseCell(m: unknown): Cell | null {
+  if (typeof m !== "object" || m === null) return null;
+  const cell = (m as Record<string, unknown>).cell;
+  if (typeof cell !== "object" || cell === null) return null;
+  const r = (cell as Record<string, unknown>).r;
+  const c = (cell as Record<string, unknown>).c;
+  if (!isInt(r) || !isInt(c)) return null;
+  return { r, c };
+}
 
 function makeConn(ws: WSContext): Connection {
   return {
@@ -131,6 +150,17 @@ export function registerSocket(app: Hono, store: RoomStore) {
               state: room.snapshot(),
             });
             room.broadcast(); // opponent sees presence restored
+            return;
+          }
+          case "move": {
+            const b = active();
+            if (!b) return; // not bound to a live room
+            const cell = parseCell(msg);
+            if (!cell) {
+              conn.send({ t: "error", code: "bad_message", message: "Malformed move." });
+              return;
+            }
+            b.room.move(b.pid, cell, conn);
             return;
           }
           case "leave": {

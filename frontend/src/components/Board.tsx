@@ -1,10 +1,15 @@
 // The shared puzzle board, in the knights-puzzle grass/hedge theme. Rendered
-// identically on both clients from the server-broadcast Board. No click handlers
-// in C1 (no movement yet) — just the field, the start/end glyphs, and both
-// knights as distinct-colored overlay pieces.
+// identically on both clients from the server-broadcast Board.
+//
+// C2: cells are clickable. Clicking a cell sends a move for the LOCAL player's
+// knight (onMove). We are deliberately PERMISSIVE — any cell click for the local
+// player is sent; the server is authoritative and rejects illegal moves. There
+// is NO optimistic UI: the board only re-renders on a server `state`. Both
+// players' trails are drawn (p1 amber, p2 violet) as a themed cell tint plus an
+// SVG polyline over each `visited` array; the two knights are drawn on top.
 
 import type { Cell } from "@shared/engine";
-import type { Board as BoardData } from "@shared/protocol";
+import type { Board as BoardData, PlayerId } from "@shared/protocol";
 
 const DESK_CELL = 56;
 const GAP = 1;
@@ -14,15 +19,32 @@ function sameCell(a: Cell, b: Cell): boolean {
   return a.r === b.r && a.c === b.c;
 }
 
+function cellKey(r: number, c: number): number {
+  return r * 1000 + c; // n is small (6); 1000 stride is ample and collision-free
+}
+
 interface Props {
   board: BoardData;
   knights: { p1: Cell; p2: Cell };
+  visited: { p1: Cell[]; p2: Cell[] };
+  onMove: (cell: Cell) => void;
 }
 
-export function Board({ board, knights }: Props) {
+// SVG polyline points for a trail in board coordinates (cell centers).
+function polyPoints(trail: Cell[]): string {
+  return trail.map((v) => `${v.c + 0.5},${v.r + 0.5}`).join(" ");
+}
+
+export function Board({ board, knights, visited, onMove }: Props) {
   const { n, available, start, end } = board;
   // Board frame is 5px each side; the playable field is n cells + (n-1) gaps.
   const maxBoardPx = n * DESK_CELL + (n - 1) * GAP + 2 * PAD + 10;
+
+  // Which player owns each visited cell, for the themed tint. p1 (amber) and p2
+  // (violet) trails are disjoint by the no-reuse rule, so a single map is safe.
+  const trailOwner = new Map<number, PlayerId>();
+  for (const v of visited.p1) trailOwner.set(cellKey(v.r, v.c), "p1");
+  for (const v of visited.p2) trailOwner.set(cellKey(v.r, v.c), "p2");
 
   return (
     <div className="board-wrap">
@@ -40,7 +62,13 @@ export function Board({ board, knights }: Props) {
             const cell = { r, c };
             const isStart = sameCell(start, cell);
             const isEnd = sameCell(end, cell);
-            const className = ["cell", dark ? "dark" : "light", avail ? "open" : "blocked"]
+            const owner = trailOwner.get(cellKey(r, c));
+            const className = [
+              "cell",
+              dark ? "dark" : "light",
+              avail ? "open" : "blocked",
+              owner === "p1" ? "trail-amber" : owner === "p2" ? "trail-violet" : "",
+            ]
               .filter(Boolean)
               .join(" ");
             return (
@@ -48,6 +76,19 @@ export function Board({ board, knights }: Props) {
                 key={k}
                 data-cell={k}
                 className={className}
+                role={avail ? "button" : undefined}
+                tabIndex={avail ? 0 : undefined}
+                onClick={avail ? () => onMove(cell) : undefined}
+                onKeyDown={
+                  avail
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onMove(cell);
+                        }
+                      }
+                    : undefined
+                }
                 aria-label={`square ${r},${c}${isEnd ? " (player 2 start)" : isStart ? " (player 1 start)" : ""}`}
               >
                 {avail && (isStart || isEnd) ? (
@@ -60,6 +101,22 @@ export function Board({ board, knights }: Props) {
           }),
         )}
       </div>
+
+      {/* Both trails as SVG polylines tracing each knight's route (p1 amber, p2
+          violet). Board-coordinate viewBox; the layer is inset to the 5px frame. */}
+      <svg
+        className="trail"
+        viewBox={`0 0 ${n} ${n}`}
+        preserveAspectRatio="none"
+        aria-hidden="true"
+      >
+        {visited.p1.length > 1 && (
+          <polyline className="trail-line trail-amber-line" points={polyPoints(visited.p1)} />
+        )}
+        {visited.p2.length > 1 && (
+          <polyline className="trail-line trail-violet-line" points={polyPoints(visited.p2)} />
+        )}
+      </svg>
 
       {/* Both knights as overlay pieces in distinct colors (p1 amber, p2 violet). */}
       <div className="piece-layer" style={{ "--n": n } as React.CSSProperties} aria-hidden="true">
