@@ -144,9 +144,10 @@ DNS / custom subdomain changes      # runs as Nil
 - [x] **C5 — View solution (both) + Hint (per-player).** Per locked decision 7.
 - [x] **C6 — Polish + cross-links + meta.** Name applied, OG/favicon, "new random
   puzzle" button, opponent-left/reconnect UX, mobile, link to/from knights-puzzle.
-- [ ] **C7 (optional, human-gated) — Deploy.** Finalize Dockerfile/fly.toml, create
-  GitHub repo, deploy, custom subdomain, add back-link into knights-puzzle repo +
-  redeploy. All credentialed steps run as Nil.
+- [x] **C7 (human-gated) — Deploy.** DONE: fly.io single machine, public GitHub repo
+  (nmamano/knight-rendezvous) + GitHub Action auto-deploy, custom subdomain
+  **rendezvous.nilmamano.com** (Let's Encrypt cert active), and cross-links from
+  Knight's Puzzle + nilmamano.com/games. All credentialed steps ran as Nil.
 
 ---
 
@@ -614,10 +615,16 @@ The witness `path` never appears on the wire (guarded in tests + smoke).
 
 **Remaining: C7 (deploy) — HUMAN-GATED, runs as Nil.** See SLICE-7 PICKUP.
 
-### parked-for-Nil queue
-- **G2 — final subdomain:** `knight-rendezvous.fly.dev` only, or a custom
-  `<something>.nilmamano.com` CNAME → fly?
-- **C7 deploy mechanism:** GitHub Action + `FLY_API_TOKEN` secret (like chess), or
-  install flyctl locally? (flyctl NOT installed on this box.)
-- **C7 credentialed steps:** create GitHub repo, `fly deploy`, DNS, and the KP→KR
-  back-link (edits the live knights-puzzle repo) — all await Nil's go-ahead.
+### parked-for-Nil queue — ALL RESOLVED ✅
+- **G2 subdomain:** resolved → `rendezvous.nilmamano.com` (A/AAAA → fly shared IPv4
+  66.241.124.166 + dedicated IPv6; Let's Encrypt cert Issued/active).
+- **Deploy mechanism:** flyctl was already installed (~/.fly/bin, from the chess
+  deploy) + fly auth present → deployed directly via `flyctl deploy`; the GitHub
+  Action + `FLY_API_TOKEN` is wired for future auto-deploys (re-run green).
+- **Cross-links:** KR→Knight's Puzzle (in-app, C6); Knight's Puzzle→KR
+  (knights-puzzle@a2ec586); nilmamano.com/games entry + card (nilmamano.com@0ed79a8).
+
+### Deploy facts (for future reference)
+- Live: https://rendezvous.nilmamano.com and https://knight-rendezvous.fly.dev
+- Repo: https://github.com/nmamano/knight-rendezvous (push to `main` auto-deploys)
+- fly app `knight-rendezvous`, personal org, single machine (in-memory state).
