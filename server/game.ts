@@ -13,7 +13,14 @@
 
 import { generatePuzzle, knightMoves, type Cell, type Puzzle } from "../shared/engine";
 import { difficultyScore } from "../shared/analysis";
-import { BOARD_N, BOARD_STEPS, PLAYBACK_STEP_MS, clampN, clampSteps } from "../shared/config";
+import {
+  BOARD_N,
+  BOARD_STEPS,
+  PLAYBACK_STEP_MS,
+  PLAYBACK_HOLD_MS,
+  clampN,
+  clampSteps,
+} from "../shared/config";
 import type { Board, ColorToken, PlayerId, PlayerView, RoomSnapshot } from "../shared/protocol";
 
 // The win projection: `status` flips to "won" on the rendezvous hop, and
@@ -153,6 +160,12 @@ export class Game {
   // pace by default; tests/smoke inject a small value so they never wait real time.
   readonly stepMs: number;
 
+  // Final-frame HOLD duration (locked decision 7): after the requester's knight
+  // reaches the partner's cell (co-located huddle), the Room holds the last frame
+  // this long before restoring. Normal ~2s by default; tests inject 0 so they
+  // never wait real seconds, smoke a small value. Threaded like stepMs.
+  readonly holdMs: number;
+
   constructor(
     readonly players: { p1: GamePlayer; p2: GamePlayer },
     seed: number = randomSeed(),
@@ -161,6 +174,7 @@ export class Game {
     // server CLAMPS both before generating (never trusts the caller's range).
     n: number = BOARD_N,
     steps: number = BOARD_STEPS,
+    holdMs: number = PLAYBACK_HOLD_MS,
   ) {
     // Clamp n FIRST, then steps against the clamped n (steps' upper bound is
     // maxSteps(n) = n*n-1). Mirrors knights-puzzle's customSettings discipline.
@@ -176,6 +190,7 @@ export class Game {
     this.knights = { p1: start, p2: end };
     this.visited = { p1: [{ ...start }], p2: [{ ...end }] };
     this.stepMs = stepMs;
+    this.holdMs = holdMs;
   }
 
   colorOf(pid: PlayerId): ColorToken {
@@ -368,21 +383,24 @@ export class Game {
   }
 
   /**
-   * Enter view-solution PLAYBACK (locked decision 7). Triggered by ONE player but
-   * room-wide: both knights animate along the witness toward the rendezvous.
+   * Enter view-solution PLAYBACK (locked decision 7). Triggered by ONE player and
+   * REQUESTER-DRIVEN: ONLY the requester's knight walks the FULL solution path;
+   * the partner stays FROZEN on its own start in every frame. The two end
+   * co-located on the partner's cell (the rendezvous geometry), held for ~2s.
    *
    * The SINGLE guard `status !== "playing"` blocks BOTH "during won" AND "second
    * playback" (and "while waiting"): if we are not cleanly playing, this is a
    * no-op the Room turns into nothing ({ entered: false }).
    *
    * Otherwise we DEEP-CLONE and SAVE the live state ({knights, visited, status,
-   * result}), flip status to "playback", and compute canonical frames from
-   * `puzzle.path` (NOT a re-derivation). The frames mutate the LIVE knights/visited
-   * fields as the Room ticks them (so the snapshot + reconnect reflect the current
-   * frame). status is NEVER set to "won" by playback — even the rendezvous frame
-   * only co-locates the two knights; restore() returns to "playing".
+   * result}), flip status to "playback", and compute the requester-driven frames
+   * from `puzzle.path` (NOT a re-derivation). The frames mutate the LIVE
+   * knights/visited fields as the Room ticks them (so the snapshot + reconnect
+   * reflect the current frame). status is NEVER set to "won" by playback — even
+   * the final frame only co-locates the two knights; restore() returns to
+   * "playing".
    */
-  viewSolution(): ViewSolutionResult {
+  viewSolution(pid: PlayerId): ViewSolutionResult {
     if (this.status !== "playing") return { entered: false };
 
     this.saved = {
@@ -396,7 +414,7 @@ export class Game {
         this.result === null ? null : { ...this.result, meetCell: cloneCell(this.result.meetCell) },
     };
     this.status = "playback";
-    return { entered: true, frames: this.buildFrames() };
+    return { entered: true, frames: this.buildFrames(pid) };
   }
 
   /**
@@ -439,61 +457,62 @@ export class Game {
   }
 
   /**
-   * Canonical playback frames from the witness `puzzle.path` (NOT a re-derivation,
-   * and deliberately NOT C3's win-path code, which flips status to "won").
+   * Requester-driven playback frames from the witness `puzzle.path` (locked
+   * decision 7; NOT a re-derivation, and deliberately NOT C3's win-path code,
+   * which flips status to "won"). ONLY the REQUESTER's knight walks the FULL
+   * solution path; the PARTNER stays FROZEN on its own start in EVERY frame. The
+   * witness `path` is ordered start (path[0]) → end (path[last]); P1 starts at
+   * path[0], P2 at path[last].
    *
-   * Split at the midpoint k exactly like the tests' convergeMidpoint: P1 walks the
-   * forward prefix path[0..k]; P2 walks the backward suffix path[last..k+1]. The
-   * two halves are disjoint and together cover every cell. The FINAL frame hops P1
-   * path[k] → path[k+1] so BOTH knights end on the SAME cell (path[k+1]) — the
-   * rendezvous geometry — WITHOUT setting status "won".
+   *  - pid === "p1": P1 walks the FULL path FORWARD (path[0]→…→path[last]); P2
+   *    frozen at path[last] (its start) in every frame. Frame i: visited.p1 =
+   *    path[0..i], knights.p1 = path[i]; visited.p2 = [path[last]], knights.p2 =
+   *    path[last]. The final frame puts P1 on path[last] = P2's cell (co-located).
+   *  - pid === "p2": symmetric — P2 walks the FULL path BACKWARD (path[last]→…→
+   *    path[0]); P1 frozen at path[0]. Frame i: visited.p2 = [path[last],
+   *    path[last-1], …, path[last-i]], knights.p2 = path[last-i]; visited.p1 =
+   *    [path[0]], knights.p1 = path[0]. The final frame puts P2 on path[0] = P1's
+   *    cell (co-located).
    *
-   * Each frame is a full {knights, visited} snapshot with growing trails. Frame 0
-   * is the reset state (both knights at their starts) so playback reads cleanly
-   * from the beginning regardless of where the live trails were when triggered.
+   * Each frame is a full {knights, visited} snapshot with the requester's trail
+   * growing. Frame 0 is the reset state (both knights on their OWN starts) so
+   * playback reads cleanly from the beginning regardless of where the live trails
+   * were when triggered. Cells are deep-cloned. The final frame only co-locates
+   * the two knights; it never sets status "won" (restore() returns to "playing").
    */
-  private buildFrames(): PlaybackFrame[] {
+  private buildFrames(pid: PlayerId): PlaybackFrame[] {
     const path = this.puzzle.path;
     const last = path.length - 1;
-    const k = Math.floor(path.length / 2);
-
     const frames: PlaybackFrame[] = [];
-    // p1Len / p2Len are how many cells of each half are currently revealed.
-    // p1 reveals path[0..p1Len-1]; p2 reveals path[last..last-(p2Len-1)].
-    const emit = (p1Len: number, p2Len: number): void => {
-      const p1Trail = path.slice(0, p1Len).map(cloneCell);
-      const p2Trail: Cell[] = [];
-      for (let j = 0; j < p2Len; j++) p2Trail.push(cloneCell(path[last - j]));
-      frames.push({
-        knights: {
-          p1: cloneCell(p1Trail[p1Trail.length - 1]),
-          p2: cloneCell(p2Trail[p2Trail.length - 1]),
-        },
-        visited: { p1: p1Trail, p2: p2Trail },
-      });
-    };
 
-    // Frame 0: reset — both knights on their starts.
-    emit(1, 1);
-    // P1 walks forward path[1..k]; P2 holds at its start (path[last]).
-    for (let i = 1; i <= k; i++) emit(i + 1, 1);
-    // P2 walks backward path[last-1..k+1]; P1 holds at path[k].
-    // p2 reveals down to path[k+1], i.e. (last - (k+1)) extra cells beyond its start.
-    const p2FullLen = last - k; // cells path[last..k+1]
-    for (let m = 2; m <= p2FullLen; m++) emit(k + 1, m);
-    // FINAL frame: P1 hops path[k] → path[k+1] (onto P2) — both on path[k+1].
-    // P1's trail becomes path[0..k] plus path[k+1] (the shared rendezvous cell).
-    {
-      const p1Trail = path.slice(0, k + 1).map(cloneCell);
-      p1Trail.push(cloneCell(path[k + 1]));
+    if (pid === "p1") {
+      // P2 frozen at its start (path[last]) in every frame.
+      const p2Frozen: Cell = cloneCell(path[last]);
+      // Frame i (i = 0..last): P1 has walked path[0..i].
+      for (let i = 0; i <= last; i++) {
+        frames.push({
+          knights: { p1: cloneCell(path[i]), p2: cloneCell(p2Frozen) },
+          visited: {
+            p1: path.slice(0, i + 1).map(cloneCell),
+            p2: [cloneCell(p2Frozen)],
+          },
+        });
+      }
+      return frames;
+    }
+
+    // pid === "p2": P1 frozen at its start (path[0]) in every frame.
+    const p1Frozen: Cell = cloneCell(path[0]);
+    // Frame i (i = 0..last): P2 has walked path[last..last-i] (backward).
+    for (let i = 0; i <= last; i++) {
       const p2Trail: Cell[] = [];
-      for (let j = 0; j < p2FullLen; j++) p2Trail.push(cloneCell(path[last - j]));
+      for (let j = 0; j <= i; j++) p2Trail.push(cloneCell(path[last - j]));
       frames.push({
-        knights: {
-          p1: cloneCell(path[k + 1]),
-          p2: cloneCell(path[k + 1]),
+        knights: { p1: cloneCell(p1Frozen), p2: cloneCell(path[last - i]) },
+        visited: {
+          p1: [cloneCell(p1Frozen)],
+          p2: p2Trail,
         },
-        visited: { p1: p1Trail, p2: p2Trail },
       });
     }
     return frames;

@@ -75,3 +75,15 @@ export function clampSteps(n: number, steps: number): number {
 // ---------------------------------------------------------------------------
 
 export const PLAYBACK_STEP_MS = 280;
+
+// ---------------------------------------------------------------------------
+// View-solution FINAL-FRAME hold (locked decision 7).
+//
+// After the requester's knight walks the full solution path and lands co-located
+// with the (frozen) partner, the Room HOLDS that final frame for this long before
+// restoring the pre-playback state — so the player sees the two knights huddled
+// at the rendezvous. Tests inject "0" (no real wait); smoke a small value; the
+// production default is ~2s. Threaded through the Game/Room like PLAYBACK_STEP_MS.
+// ---------------------------------------------------------------------------
+
+export const PLAYBACK_HOLD_MS = 2000;

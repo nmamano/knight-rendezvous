@@ -58,6 +58,10 @@ export function Board({
   hintNonce,
 }: Props) {
   const { n, available, start, end } = board;
+  // True when both knights occupy the SAME square — the rendezvous WIN and the
+  // view-solution FINAL frame. Drives the side-by-side "huddle" render so neither
+  // knight is hidden behind the other. Independent of `status` (covers both cases).
+  const coLocated = sameCell(knights.p1, knights.p2);
   // Fix 1 — fast lookup of the local player's legal next squares for the .legal ring.
   const legalSet = new Set<number>();
   for (const lc of legalCells ?? []) legalSet.add(cellKey(lc.r, lc.c));
@@ -156,11 +160,17 @@ export function Board({
         )}
       </svg>
 
-      {/* Both knights as overlay pieces in distinct colors (p1 amber, p2 violet). */}
+      {/* Both knights as overlay pieces in distinct colors (p1 amber, p2 violet).
+          When the two knights occupy the SAME cell — the rendezvous WIN and the
+          view-solution FINAL frame (held ~2s) — they would otherwise stack and
+          look like one ate the other. The `huddled` class shrinks + offsets +
+          tilts each so BOTH read clearly, side-by-side, leaning toward each other.
+          Triggered purely on co-location, regardless of `status`. */}
       <div className="piece-layer" style={{ "--n": n } as React.CSSProperties} aria-hidden="true">
         <span
-          className="piece amber"
+          className={`piece amber${coLocated ? " huddled" : ""}`}
           data-knight="p1"
+          data-huddled={coLocated ? "1" : undefined}
           style={{
             left: `${((knights.p1.c + 0.5) / n) * 100}%`,
             top: `${((knights.p1.r + 0.5) / n) * 100}%`,
@@ -169,8 +179,9 @@ export function Board({
           ♞
         </span>
         <span
-          className="piece violet"
+          className={`piece violet${coLocated ? " huddled" : ""}`}
           data-knight="p2"
+          data-huddled={coLocated ? "1" : undefined}
           style={{
             left: `${((knights.p2.c + 0.5) / n) * 100}%`,
             top: `${((knights.p2.r + 0.5) / n) * 100}%`,

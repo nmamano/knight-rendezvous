@@ -49,12 +49,15 @@ function startServer() {
     stdio: ["ignore", "pipe", "pipe"],
     // KR_PLAYBACK_STEP_MS: a small view-solution cadence so the C5 playback
     // assertions never wait real seconds (still uses waitForFunction, never a
-    // fixed timeout). RoomStore reads it per createRoom.
+    // fixed timeout). KR_PLAYBACK_HOLD_MS: a small final-frame hold so the
+    // co-located huddle is briefly held (long enough to observe) but the smoke
+    // never waits the real ~2s. RoomStore reads both per createRoom.
     env: {
       ...process.env,
       PORT: String(PORT),
       NODE_ENV: "production",
       KR_PLAYBACK_STEP_MS: "20",
+      KR_PLAYBACK_HOLD_MS: "50",
     },
   });
   let stderr = "";
@@ -477,11 +480,13 @@ try {
   // p1 is back on its start and p2 never moved → the perfect-win choreography
   // below proceeds exactly as in C3.
 
-  // ---- C5: VIEW SOLUTION (room-wide) — both contexts animate then RESTORE -----
-  // p1 hops once so the pre-playback state is non-trivial (the restore must bring
-  // it back EXACTLY). Drive the real "View solution" button on context A; assert
-  // via the server-authoritative window.__KR__ on BOTH contexts that status goes
-  // "playback" then back to "playing" with the pre-playback state restored.
+  // ---- C5: VIEW SOLUTION (single-knight, requester-driven) — animate then
+  // RESTORE. p1 hops once so the pre-playback state is non-trivial (the restore
+  // must bring it back EXACTLY). p1 is the REQUESTER, so ONLY p1's knight walks the
+  // full solution path while p2 stays FROZEN on its start (board.end); they end
+  // co-located on board.end (held briefly), then restore. Drive the real "View
+  // solution" button on context A; judge via the server-authoritative window.__KR__
+  // on BOTH contexts.
   await hopAndConverge(pageA, "p1", path[1]); // p1 trail: [start, path[1]]
   await awaitP1(2, path[1]);
   const preVS = JSON.stringify(
@@ -492,6 +497,9 @@ try {
       result: window.__KR__.result,
     })),
   );
+  // p2's frozen position (its start = board.end) — it must NOT change at any point
+  // during the single-knight playback.
+  const p2Frozen = await pageA.evaluate(() => window.__KR__.knights.p2);
 
   await pageA.getByRole("button", { name: "View solution" }).click();
 
@@ -501,6 +509,41 @@ try {
       timeout: 15000,
     });
   }
+  // During playback the PARTNER (p2) knight is CONSTANT (== its start) — assert it
+  // is unchanged on BOTH contexts while still in playback.
+  for (const [page, label] of [
+    [pageA, "A"],
+    [pageB, "B"],
+  ]) {
+    const p2Now = await page.evaluate(() => ({
+      k: window.__KR__.knights.p2,
+      status: window.__KR__.status,
+    }));
+    if (p2Now.status === "playback" && !sameCell(p2Now.k, p2Frozen)) {
+      throw new Error(
+        `[${label}] partner knight moved during single-knight playback: ${JSON.stringify(p2Now.k)} vs ${JSON.stringify(p2Frozen)}`,
+      );
+    }
+  }
+  // The REQUESTER (p1) ends ON the partner's cell (co-located) on the final
+  // playback frame, with the partner still on its start — observe that huddle frame
+  // (held ~50ms) on context A via the server snapshot.
+  await pageA.waitForFunction(
+    (pf) => {
+      const s = window.__KR__;
+      return (
+        s &&
+        s.status === "playback" &&
+        s.knights &&
+        s.knights.p1.r === pf.r &&
+        s.knights.p1.c === pf.c &&
+        s.knights.p2.r === pf.r &&
+        s.knights.p2.c === pf.c
+      );
+    },
+    p2Frozen,
+    { timeout: 15000 },
+  );
   // BOTH contexts must then return to "playing" with the pre-playback state
   // restored EXACTLY (view-solution never marks the puzzle solved).
   for (const [page, label] of [
@@ -689,6 +732,41 @@ try {
   }
   if (JSON.stringify(wonA).includes('"path"')) {
     throw new Error("post-win snapshot leaked the witness path");
+  }
+
+  // ---- HUDDLE: at the rendezvous (both knights on the SAME cell) BOTH knight
+  // pieces must still be present AND carry the huddled class/attr so neither is
+  // hidden behind the other (cute side-by-side render). Assert on BOTH contexts.
+  for (const [page, label] of [
+    [pageA, "A"],
+    [pageB, "B"],
+  ]) {
+    const huddle = await page.evaluate(() => {
+      const p1 = document.querySelector('[data-knight="p1"]');
+      const p2 = document.querySelector('[data-knight="p2"]');
+      return {
+        p1Present: !!p1,
+        p2Present: !!p2,
+        p1Huddled: !!p1 && (p1.classList.contains("huddled") || p1.dataset.huddled === "1"),
+        p2Huddled: !!p2 && (p2.classList.contains("huddled") || p2.dataset.huddled === "1"),
+        knightCount: document.querySelectorAll("[data-knight]").length,
+      };
+    });
+    if (!huddle.p1Present || !huddle.p2Present) {
+      throw new Error(
+        `[${label}] a knight piece is missing at the rendezvous: ${JSON.stringify(huddle)}`,
+      );
+    }
+    if (huddle.knightCount !== 2) {
+      throw new Error(
+        `[${label}] expected 2 knight pieces at the rendezvous, got ${huddle.knightCount}`,
+      );
+    }
+    if (!huddle.p1Huddled || !huddle.p2Huddled) {
+      throw new Error(
+        `[${label}] both knights must carry the huddled class/attr at the rendezvous: ${JSON.stringify(huddle)}`,
+      );
+    }
   }
 
   // ---- Fix 2: UNDO un-sets `won` (the soft, reversible win). The Undo button is
@@ -907,7 +985,10 @@ try {
         c4RetryVerified: true,
         c4OtherPlayerUntouched: true,
         c5ViewSolutionRestored: true,
+        c5ViewSolutionSingleKnightPartnerFrozen: true,
+        c5ViewSolutionRequesterCoLocatedFinale: true,
         c5HintActorOnly: true,
+        huddleAtRendezvous: true,
         c6NewPuzzleReset: true,
         c6NewPuzzleSeed: freshA.board.seed,
         c6OutboundLinkPresent: true,

@@ -6,7 +6,7 @@
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import app from "../server/index.ts";
-import type { Board, ClientMsg, ServerMsg } from "../shared/protocol";
+import type { Board, ClientMsg, ServerMsg, PlayerId } from "../shared/protocol";
 import { generatePuzzle, knightMoves, type Cell } from "../shared/engine";
 import { difficultyScore } from "../shared/analysis";
 
@@ -21,6 +21,10 @@ beforeAll(() => {
   // reads this env lazily per createRoom, so setting it before any room is created
   // (i.e. here, before the first test) is sufficient.
   process.env.KR_PLAYBACK_STEP_MS = "1";
+  // The view-solution FINAL-FRAME hold (locked decision 7) — set to 0 so the
+  // tests never wait the real ~2s huddle hold. resolveHoldMs reads this lazily
+  // per createRoom and accepts 0 (an instant restore after the last frame).
+  process.env.KR_PLAYBACK_HOLD_MS = "0";
   server = Bun.serve({ port: 0, fetch: app.fetch, websocket: app.websocket });
   WS_URL = `ws://localhost:${server.port}/ws`;
 });
@@ -1275,7 +1279,60 @@ async function runViewSolution(p1: Client, p2: Client, actor: Client) {
 }
 
 describe("C5 view-solution + hint (real WS)", () => {
-  test("viewSolution: BOTH clients see playback frames, then state RESTORES byte-equal; never won", async () => {
+  // Assert the SINGLE-KNIGHT, requester-driven playback (locked decision 7): only
+  // the requester's knight advances along the full solution path; the partner's
+  // knight is CONSTANT (== its start) across ALL frames; the final frame puts the
+  // requester ON the partner's start cell (co-located) with the partner still on
+  // its start. `requester` is "p1" (walks forward from its own start) or "p2"
+  // (walks backward to p1's start). Returns the streamed playback frames.
+  function assertSingleKnightPlayback(
+    requester: PlayerId,
+    init: ReturnType<typeof activeState>,
+    frames: OfType<"state">[],
+  ) {
+    const partner = requester === "p1" ? "p2" : "p1";
+    // The frozen partner's start cell — p1 = board.start, p2 = board.end. The
+    // requester's full path ends ON this exact cell (the co-located rendezvous).
+    const partnerStart = requester === "p1" ? init.board.end : init.board.start;
+    const requesterStart = requester === "p1" ? init.board.start : init.board.end;
+
+    expect(frames.length).toBeGreaterThan(1);
+
+    // The PARTNER's knight is the SAME (its start) in EVERY frame, and its trail is
+    // the singleton [start] throughout (it never moves).
+    for (const m of frames) {
+      const v = m.state.visited!;
+      const k = m.state.knights!;
+      expect(sameCell(k[partner], partnerStart)).toBe(true);
+      expect(v[partner].length).toBe(1);
+      expect(sameCell(v[partner][0], partnerStart)).toBe(true);
+    }
+
+    // The REQUESTER's knight ADVANCES and its visited GROWS across frames.
+    const firstReq = frames[0].state.knights![requester];
+    const lastReq = frames[frames.length - 1].state.knights![requester];
+    expect(sameCell(firstReq, lastReq)).toBe(false);
+    expect(frames[0].state.visited![requester].length).toBeLessThan(
+      frames[frames.length - 1].state.visited![requester].length,
+    );
+
+    // Frame 0 = reset: BOTH knights on their OWN starts.
+    expect(sameCell(frames[0].state.knights![requester], requesterStart)).toBe(true);
+    expect(sameCell(frames[0].state.knights![partner], partnerStart)).toBe(true);
+
+    // FINAL frame: the requester's knight is ON the partner's start cell
+    // (co-located), and the partner is STILL on its start.
+    const finalReqKnight = frames[frames.length - 1].state.knights![requester];
+    const finalPartnerKnight = frames[frames.length - 1].state.knights![partner];
+    expect(sameCell(finalReqKnight, partnerStart)).toBe(true);
+    expect(sameCell(finalPartnerKnight, partnerStart)).toBe(true);
+
+    // Playback NEVER marked the puzzle solved (status "playback", result null).
+    expect(frames.every((m) => m.state.status === "playback")).toBe(true);
+    expect(frames.every((m) => m.state.result === null)).toBe(true);
+  }
+
+  test("viewSolution requester P1: only P1 walks the FULL path, P2 frozen at end; restores byte-equal; never won", async () => {
     const { p1, p2, init } = await activeGame();
     // Move both knights a few hops so the restore target is a NON-trivial state
     // (not just the initial position) — a regression that fails to restore would
@@ -1287,10 +1344,8 @@ describe("C5 view-solution + hint (real WS)", () => {
       await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, path[j]));
     }
     p2.send({ t: "move", cell: path[last - 1] });
-    await awaitMoveApplied(p1, p2, (v) => inCells(v.p2, path[last - 1]));
+    const pre = await awaitMoveApplied(p1, p2, (v) => inCells(v.p2, path[last - 1]));
 
-    // Capture the playback frames as they stream: collect every state with status
-    // "playback" on p1. There must be MORE THAN ONE (knights advancing).
     const beforePlaybackStates = p1.states().length;
     const { prePlayback, restored, restored2 } = await runViewSolution(p1, p2, p1);
 
@@ -1298,22 +1353,49 @@ describe("C5 view-solution + hint (real WS)", () => {
       .states()
       .slice(beforePlaybackStates)
       .filter((m) => m.state.status === "playback");
-    expect(playbackFrames.length).toBeGreaterThan(1);
-    // Frames actually MOVE the knights (the trails grow across frames).
-    const firstFrame = playbackFrames[0].state;
-    const lastFrame = playbackFrames[playbackFrames.length - 1].state;
-    expect(JSON.stringify(firstFrame.knights)).not.toBe(JSON.stringify(lastFrame.knights));
+    // Single-knight, requester-driven: P1 advances along the full path; P2 frozen
+    // at its start (board.end) across ALL frames; final frame co-locates them.
+    assertSingleKnightPlayback("p1", init, playbackFrames);
 
-    // Playback NEVER marked the puzzle solved.
-    expect(playbackFrames.every((m) => m.state.status === "playback")).toBe(true);
-    expect(playbackFrames.every((m) => m.state.result === null)).toBe(true);
-
-    // After playback the state is byte-equal to the pre-playback state
-    // (knights + visited + status + result) and status is "playing", NOT "won".
+    // After playback the state is byte-equal to the pre-playback state and status
+    // is "playing", NOT "won". (`pre` is the same non-trivial pre-playback state.)
     expect(restored.status).toBe("playing");
     expect(restored.result).toBeNull();
     expect(JSON.stringify(restored)).toBe(JSON.stringify(prePlayback));
+    expect(JSON.stringify(restored)).toBe(JSON.stringify(pre));
     // Both clients agree on the restored state (each read from its own restore).
+    expect(JSON.stringify(restored2)).toBe(JSON.stringify(restored));
+    p1.close();
+    p2.close();
+  });
+
+  test("viewSolution requester P2: only P2 walks the FULL path BACKWARD, P1 frozen at start; restores byte-equal; never won", async () => {
+    const { p1, p2, init } = await activeGame();
+    // Non-trivial pre-playback state again, then P2 triggers the view-solution.
+    const path = reconstructPath(init.board, init.knights.p1, init.knights.p2);
+    const last = path.length - 1;
+    for (let j = 1; j <= 2; j++) {
+      p1.send({ t: "move", cell: path[j] });
+      await awaitMoveApplied(p1, p2, (v) => inCells(v.p1, path[j]));
+    }
+    p2.send({ t: "move", cell: path[last - 1] });
+    const pre = await awaitMoveApplied(p1, p2, (v) => inCells(v.p2, path[last - 1]));
+
+    const beforePlaybackStates = p2.states().length;
+    const { prePlayback, restored, restored2 } = await runViewSolution(p1, p2, p2);
+
+    const playbackFrames = p2
+      .states()
+      .slice(beforePlaybackStates)
+      .filter((m) => m.state.status === "playback");
+    // Single-knight, requester-driven: P2 advances backward along the full path;
+    // P1 frozen at its start (board.start) across ALL frames; final co-locates.
+    assertSingleKnightPlayback("p2", init, playbackFrames);
+
+    expect(restored.status).toBe("playing");
+    expect(restored.result).toBeNull();
+    expect(JSON.stringify(restored)).toBe(JSON.stringify(prePlayback));
+    expect(JSON.stringify(restored)).toBe(JSON.stringify(pre));
     expect(JSON.stringify(restored2)).toBe(JSON.stringify(restored));
     p1.close();
     p2.close();

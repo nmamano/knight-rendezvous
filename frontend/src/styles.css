@@ -261,3 +261,23 @@
   color: var(--violet);
   -webkit-text-stroke: 1.4px var(--violet-ink);
 }
+
+/* Huddle: when both knights share one cell (rendezvous WIN + view-solution final
+   frame), they would otherwise stack and look like one ate the other. Shrink each
+   to ~62% and nudge them apart horizontally so BOTH are fully visible side-by-side
+   within the single cell, and lean them toward each other for a cute huddle. Both
+   stay centered on the shared cell (the base translate(-50%, -50%) is preserved in
+   each compound transform). A short transition makes the meet feel springy. */
+.piece.huddled {
+  transition:
+    transform 180ms ease-out,
+    font-size 180ms ease-out;
+}
+.piece.amber.huddled {
+  /* amber nudged LEFT, leaning right (toward violet). */
+  transform: translate(-50%, -50%) translateX(-26%) scale(0.62) rotate(9deg);
+}
+.piece.violet.huddled {
+  /* violet nudged RIGHT, leaning left (toward amber). */
+  transform: translate(-50%, -50%) translateX(26%) scale(0.62) rotate(-9deg);
+}
