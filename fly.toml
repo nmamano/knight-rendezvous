@@ -1,0 +1,26 @@
+# fly.toml: Knight Rendezvous
+#
+# ⚠️ SINGLE-MACHINE CONSTRAINT (read before scaling):
+# All game state (rooms, both knights, trails) is in-memory in one Bun process. A
+# second machine would hold a separate room store, so two players hitting different
+# machines could never meet. Keep EXACTLY ONE machine: `min_machines_running = 1`
+# and do NOT scale past 1 (`fly scale count 1`). In-flight games are lost on machine
+# restart — acceptable and ephemeral by design (no levels, no persistence).
+
+app = 'knight-rendezvous'
+primary_region = 'sjc'
+
+[build]
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+[[vm]]
+  memory = '256mb'
+  cpu_kind = 'shared'
+  cpus = 1

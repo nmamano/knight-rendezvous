@@ -1,0 +1,22 @@
+name: Fly Deploy
+
+# Deploy to fly.io on every push to main.
+# Single machine only (in-memory room state): --ha=false stops fly from adding a
+# second machine on deploy. See fly.toml for the single-machine rationale.
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy app
+    runs-on: ubuntu-latest
+    concurrency: deploy-group
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl deploy --remote-only --ha=false
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

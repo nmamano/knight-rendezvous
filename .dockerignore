@@ -1,0 +1,12 @@
+/.git
+**/node_modules
+**/dist
+/tests
+.dockerignore
+.env
+.env.*
+Dockerfile
+fly.toml
+*.log
+.eslintcache
+.DS_Store
