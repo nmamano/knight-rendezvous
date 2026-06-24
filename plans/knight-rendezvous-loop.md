@@ -403,6 +403,83 @@ round-trip-chess 111/111 (incl. real-WS integration).
   `server/game.ts` (add `retry`/`undo`); `shared/protocol.ts` (add msgs);
   `frontend` controls (knights-puzzle look); `tests/integration.test.ts`.
 
+## SLICE-5 PICKUP (C5 — view-solution to BOTH + per-player hint) — authored after C4
+- **Baseline commit:** `db9dfa8` (C4).
+- **What C4 taught (fold in):**
+  - The input-lock now spans THREE client mutators: `move`, `retry`, `undo`. C5's
+    "inputs locked during playback" must gate ALL three. Use ONE authoritative,
+    server-state-driven lock — a status — not a third ad-hoc client lock. The
+    established guard shape is `if (status==="won") return gameOver(...)` at the top
+    of move/retry/undo; add a `playback` status that those three also short-circuit on.
+  - **`playback` must be DISTINCT from `won` and REVERSIBLE** back to `playing`
+    (locked #7: "view solution never marks the puzzle solved"). Unlike C4 (which
+    never mutates post-win), C5 must SAVE the live state (knights, visited, status)
+    before playback and RESTORE it exactly when playback ends. Plan the save/restore.
+  - **Room-wide vs per-player:** view-solution is room-wide (both knights animate) →
+    fits `broadcast()` + the room-level `playback` status. **Hint is per-player** —
+    the first feature whose RESPONSE is actor-only (like the error-to-actor path),
+    NOT a broadcast. Add a new actor-only `ServerMsg` (e.g. `{t:"hint", ...}`); keep
+    the snapshot fully player-agnostic.
+  - **The witness `path` must NEVER leak as a raw `"path"` field.** Hint = project
+    only the SINGLE next cell; solution = drive animation via server frames / a
+    dedicated message. The `"path"`-substring guards stay; keep them green.
+  - No optimistic UI: hint highlights a server-returned cell; playback renders
+    server-driven frames. `colorOf` triplication still parked.
+- **Goal (locked #7):**
+  - **View solution:** triggered by ONE player, plays on BOTH clients — both knights
+    animate along the witness from their two ends toward the meeting square; `move`/
+    `retry`/`undo` LOCKED during playback; playback NEVER marks solved; when it ends
+    the game RETURNS to its prior live state (`status:"playing"`, knights/visited
+    restored to pre-playback).
+  - **Hint:** per-player, witness-only — points the REQUESTING player's OWN knight to
+    its next witness cell (toward the middle); off-witness → an `off_path`-style
+    response (mirror knights-puzzle `analysis.ts` hint). Actor-only; the other
+    client learns nothing.
+- **Load-bearing mechanics / traps:**
+  - **Witness split for two knights:** the witness `c0..c_{L-1}` (c0=start,
+    c_{L-1}=end). P1's half = forward prefix from c0; P2's half = backward from
+    c_{L-1}. The canonical perfect solution (already exercised by the C3 full-cover
+    drive / `reconstructPath` split): P1 walks `c0..c_k`, P2 walks `c_{L-1}..c_{k+1}`
+    (disjoint, together all L cells), then P1 hops `c_k → c_{k+1}` (onto P2) = the
+    same-square rendezvous. Reuse that split to compute the playback frames AND the
+    per-player hint (P1's next = next path cell after its current IF on the prefix;
+    P2's next = previous path cell before its current IF on the suffix).
+  - **Playback driver = server-authoritative** (keeps the oracle on the server, both
+    clients trivially in sync): on request, save live state, set `status:"playback"`,
+    stream stepped snapshots (knights at frame positions, visited growing) on a timer,
+    then restore saved state + `status:"playing"` and broadcast. **Make the step
+    interval configurable/small for tests** (don't make integration tests wait real
+    seconds). Only ONE playback at a time (ignore a 2nd request). Reject move/retry/
+    undo during playback (decide w/ diff-gate: explicit code vs silent no-op).
+  - **Hint:** `ClientMsg {t:"hint"}` → server computes the requester's next witness
+    cell → actor-only `ServerMsg {t:"hint", ...}` (cell or a status union). Allowed
+    only while `playing` (not during `playback`/`won`). Client pulses the cell
+    transiently (knights-puzzle look).
+  - Frontend: "View solution" + "Hint" buttons; during playback lock board + retry +
+    undo + hint and show a "playing solution…" indicator.
+- **Acceptance criteria:**
+  - Always-run gates green.
+  - Integration: view-solution from one client → BOTH observe `status:"playback"`
+    then a frame sequence; during playback move/retry/undo rejected; AFTER playback
+    the state equals pre-playback (knights, visited, `status:"playing"`) — puzzle NOT
+    marked solved. Hint: requester gets the correct next witness cell ACTOR-ONLY (the
+    other client receives NOTHING); off-witness → off_path; hint rejected during
+    playback/won. `"path"` never on the wire (guard stays green).
+  - Dual-client smoke: one context clicks View Solution → both see knights animate
+    then return to playable; one context requests a hint → only that context
+    highlights a cell. Judge via `window.__KR__`/server.
+- **Decide-with-(diff-gate)-subagent:** server-timed frames vs client-animated single
+  message; playback rejection (explicit code vs silent); hint response shape
+  (cell vs status union); step-interval testability seam.
+- **Locked (don't relitigate):** decisions 1–9, esp. **#7** (view-solution to both,
+  inputs locked, NEVER marks solved, returns to prior state; hint per-player
+  witness-only, actor-only). Do NOT implement C6 polish/cross-links here.
+- **Resources:** `knights-puzzle/src/App.tsx` `handleViewSolution` (STEP_MS reset+step
+  playback) + `src/analysis.ts` `hint` (prefix/off_path); `server/game.ts` (add
+  view-solution/hint + `playback` status + save/restore); `shared/protocol.ts`
+  (`playback` status, `hint` ServerMsg, `view_solution`/`hint` ClientMsg); the C3
+  full-cover `reconstructPath` split for canonical frames.
+
 ## SLICE-N PICKUP — authored when N-1 commits
 > Author each next handoff only AFTER the previous one commits, folding in a
 > "what slice N-1 taught" block at the top. That is where workflow knowledge
