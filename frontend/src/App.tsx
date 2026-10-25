@@ -5,7 +5,7 @@ import { Board } from "@/components/Board";
 import { Net, type Status } from "@/net/socket";
 import { knightMoves, type Cell } from "@shared/engine";
 import { MIN_N, MAX_N, MIN_STEPS, maxSteps, clampSteps } from "@shared/config";
-import type { Board, PlayerId, RoomSnapshot, ServerMsg } from "@shared/protocol";
+import type { Board as BoardData, PlayerId, RoomSnapshot, ServerMsg } from "@shared/protocol";
 
 const SESSION_KEY = "knight-rendezvous";
 
@@ -71,7 +71,7 @@ function sameCell(a: Cell, b: Cell): boolean {
 // is in the partner's trail), but that cell is exactly the square we must surface
 // so players can see how to win. Returns [] for a missing `you`.
 function legalTargets(
-  board: Board,
+  board: BoardData,
   you: PlayerId | null,
   knights: { p1: Cell; p2: Cell },
   visited: { p1: Cell[]; p2: Cell[] },
@@ -110,7 +110,7 @@ function coverage(visited: { p1: Cell[]; p2: Cell[] }): number {
   return covered.size;
 }
 
-function availableCount(board: Board): number {
+function availableCount(board: BoardData): number {
   let total = 0;
   for (const row of board.available) for (const a of row) if (a) total++;
   return total;
