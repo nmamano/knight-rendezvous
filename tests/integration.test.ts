@@ -5,7 +5,7 @@
 // distinct colors — and the witness `path` must NEVER appear on the wire.
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import app from "../server/index.ts";
+import { handlers as app } from "../server/index.ts";
 import type { Board, ClientMsg, ServerMsg, PlayerId } from "../shared/protocol";
 import { generatePuzzle, knightMoves, type Cell } from "../shared/engine";
 import { difficultyScore } from "../shared/analysis";
@@ -1938,5 +1938,17 @@ describe("C6 newPuzzle (real WS)", () => {
     expect(noPath(p2)).toBe(true);
     p1.close();
     p2.close();
+  });
+});
+
+describe("frame size limit (real WS)", () => {
+  test("a frame over the size limit closes the socket", async () => {
+    const ws = new WebSocket(WS_URL);
+    await new Promise((r) => ws.addEventListener("open", r));
+    const closed = new Promise<number>((r) => ws.addEventListener("close", (e) => r(e.code)));
+    ws.send("x".repeat(100 * 1024));
+    // Bun 1.4 sends close code 1009. Bun 1.3.11 (the Dockerfile pin) drops the
+    // connection without a close frame, so the client sees 1006.
+    expect([1006, 1009]).toContain(await closed);
   });
 });
