@@ -1,0 +1,48 @@
+# Build image: the game server image for the shared VPS. On every push to main: the
+# repo's own gate (`bun run ci`: prettier, eslint, typecheck, tests, vite build), then the
+# Docker image, pushed to GHCR. The VPS deploy follows the `main` tag and reads the commit
+# from the image label. fly-deploy.yml stays until the Fly app is retired (rollback target).
+name: Build image
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: image
+  cancel-in-progress: false
+env:
+  IMAGE: ghcr.io/nmamano/knight-rendezvous
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # The newest main: a queued run builds what the branch holds now.
+      - name: Check out main
+        run: git clone --quiet --depth 1 --branch main "https://github.com/${{ github.repository }}.git" .
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.11"
+      - name: Install, check and build
+        run: |
+          bun install --frozen-lockfile
+          (cd frontend && bun install --frozen-lockfile)
+          bun run ci
+      - name: Build and push the image
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          commit=$(git rev-parse HEAD)
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # One plain linux/amd64 manifest, no attestation index.
+          docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
+            --label "org.opencontainers.image.revision=$commit" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            -t "$IMAGE:sha-$commit" -t "$IMAGE:main" --push .
+          docker logout ghcr.io
+          echo "Pushed $IMAGE:sha-$commit (commit $commit)" >> "$GITHUB_STEP_SUMMARY"
