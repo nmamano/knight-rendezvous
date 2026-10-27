@@ -9,7 +9,7 @@ square**. Move freely, no turns.
 
 - **Look & base logic:** ported from `knights-puzzle`.
 - **Networking, pairing & deploy shape:** modeled on `round-trip-chess`
-  (Bun + Hono WebSocket server, server-authoritative, fly.io single machine).
+  (Bun + Hono WebSocket server, server-authoritative, one server process).
 
 Built via a gated slice loop — see [`plans/knight-rendezvous-loop.md`](plans/knight-rendezvous-loop.md).
 
@@ -18,5 +18,5 @@ Built via a gated slice loop — see [`plans/knight-rendezvous-loop.md`](plans/k
 rendezvous win, per-player retry/undo, view-solution (both clients) + hint, plus
 branding, a "New puzzle" button, opponent-left/reconnect UX, responsive controls,
 and an outbound link to Knight's Puzzle. All gates green (58 tests + dual-client
-smoke). Remaining: **C7 — deploy** (fly.io, GitHub repo, subdomain, KP back-link)
-— human-gated, runs as Nil; see `plans/knight-rendezvous-loop.md`.
+smoke). Deployed at rendezvous.nilmamano.com: one container on the shared VPS; GitHub
+Actions builds the image (`.github/workflows/image.yml`).

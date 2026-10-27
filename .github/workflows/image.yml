@@ -1,7 +1,7 @@
 # Build image: the game server image for the shared VPS. On every push to main: the
 # repo's own gate (`bun run ci`: prettier, eslint, typecheck, tests, vite build), then the
 # Docker image, pushed to GHCR. The VPS deploy follows the `main` tag and reads the commit
-# from the image label. fly-deploy.yml stays until the Fly app is retired (rollback target).
+# from the image label.
 name: Build image
 on:
   push:

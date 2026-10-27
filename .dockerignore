@@ -6,7 +6,6 @@
 .env
 .env.*
 Dockerfile
-fly.toml
 *.log
 .eslintcache
 .DS_Store

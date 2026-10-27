@@ -1,5 +1,6 @@
 // Hono app: WS upgrade, static serving of the built frontend, listen on PORT or SITE_SOCKET.
-// In-memory state only — this MUST run on exactly one machine (deploy is C7).
+// In-memory state only: this MUST run as exactly one process. A second one would hold
+// a separate room store, so two players on different processes could never meet.
 
 import { chmodSync, rmSync } from "node:fs";
 import { Hono } from "hono";
